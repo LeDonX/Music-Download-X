@@ -95,6 +95,16 @@ button *,
   -webkit-tap-highlight-color: transparent;
 }
 
+.custom-select-trigger,
+.custom-option {
+  pointer-events: auto;
+}
+
+.custom-select-trigger *,
+.custom-option * {
+  pointer-events: none;
+}
+
 button:focus,
 button:focus-visible,
 a:focus,
