@@ -37,6 +37,8 @@ const state = {
   isLoading: false,
   searchRequestId: 0,
   searchAbortController: null,
+  activeSearchKey: '',
+  loadingMode: '',
   isInputComposing: false,
 };
 
@@ -366,8 +368,21 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function fetchSearchData(page, { signal } = {}) {
-  const searchUrl = `/api/search?keyword=${encodeURIComponent(state.currentKeyword)}&source=${state.currentSource}&page=${page}&limit=${state.limit}&_=${Date.now()}`;
+function getSearchParams(page) {
+  return {
+    keyword: state.currentKeyword,
+    source: state.currentSource,
+    page,
+    limit: state.limit,
+  };
+}
+
+function getSearchKey(keyword, source) {
+  return `${source}\u0000${keyword}`;
+}
+
+async function fetchSearchData(params, { signal } = {}) {
+  const searchUrl = `/api/search?keyword=${encodeURIComponent(params.keyword)}&source=${params.source}&page=${params.page}&limit=${params.limit}&_=${Date.now()}`;
   const res = await fetch(searchUrl, {
     signal,
     cache: 'no-store',
@@ -405,19 +420,20 @@ function createAttemptSignal(parentSignal, timeoutMs) {
   };
 }
 
-async function fetchSearchDataWithRetry(page, requestId, controller) {
+async function fetchSearchDataWithRetry(params, requestId, controller, { retryEmpty = params.page === 1 } = {}) {
   let lastData = null;
   let lastError = null;
-  const maxAttempts = page === 1 ? SEARCH_EMPTY_RETRY_LIMIT + 1 : 1;
+  const maxAttempts = retryEmpty ? SEARCH_EMPTY_RETRY_LIMIT + 1 : 1;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (requestId !== state.searchRequestId) return null;
     const attemptSignal = createAttemptSignal(controller.signal, SEARCH_TIMEOUT_MS);
     try {
-      const data = await fetchSearchData(page, { signal: attemptSignal.signal });
+      const data = await fetchSearchData(params, { signal: attemptSignal.signal });
+      if (attemptSignal.wasParentAborted() || requestId !== state.searchRequestId) return null;
       lastData = data;
       const list = data.list || [];
-      if (page !== 1 || list.length || attempt === maxAttempts - 1) return data;
+      if (!retryEmpty || list.length || attempt === maxAttempts - 1) return data;
     } catch (err) {
       lastError = err;
       if (attemptSignal.wasParentAborted() || requestId !== state.searchRequestId || attempt === maxAttempts - 1) throw err;
@@ -425,6 +441,7 @@ async function fetchSearchDataWithRetry(page, requestId, controller) {
       attemptSignal.dispose();
     }
 
+    if (requestId !== state.searchRequestId) return null;
     el.resultsCount.innerText = `正在搜索... (${attempt + 2}/${maxAttempts})`;
     await delay(SEARCH_RETRY_DELAYS[attempt] || SEARCH_RETRY_DELAYS[SEARCH_RETRY_DELAYS.length - 1]);
   }
@@ -1022,8 +1039,11 @@ function clearSearchInput() {
   state.currentPage = 1;
   state.totalCount = 0;
   state.isLoading = false;
+  state.activeSearchKey = '';
+  state.loadingMode = '';
   el.searchInput.value = '';
   updateClearSearchButton();
+  showBottomLoadingIndicator(false);
   renderInitialEmptyState();
   requestAnimationFrame(() => {
     el.searchInput.focus({ preventScroll: true });
@@ -1085,6 +1105,11 @@ async function performSearch() {
   const keyword = el.searchInput.value.trim();
   if (!keyword) return;
 
+  const searchKey = getSearchKey(keyword, state.currentSource);
+  if (state.isLoading && state.loadingMode === 'search' && state.activeSearchKey === searchKey) {
+    return;
+  }
+
   if (state.searchAbortController) {
     state.searchAbortController.abort();
   }
@@ -1093,12 +1118,16 @@ async function performSearch() {
   state.currentKeyword = keyword;
   state.currentResults = []; // Clear previous batch
   state.totalCount = 0;
-  await fetchPage(state.currentPage, state.searchRequestId);
+  state.activeSearchKey = searchKey;
+  showBottomLoadingIndicator(false);
+  const params = getSearchParams(state.currentPage);
+  await fetchPage(params, state.searchRequestId);
 }
 
 // Fetch Search Results for Specific Page (Waterfall Initial Page)
-async function fetchPage(page, requestId = state.searchRequestId) {
+async function fetchPage(params, requestId = state.searchRequestId) {
   state.isLoading = true;
+  state.loadingMode = 'search';
   const controller = new AbortController();
   state.searchAbortController = controller;
   el.songList.innerHTML = `
@@ -1110,12 +1139,12 @@ async function fetchPage(page, requestId = state.searchRequestId) {
   el.resultsCount.innerText = '正在搜索...';
 
   try {
-    const data = await fetchSearchDataWithRetry(page, requestId, controller);
+    const data = await fetchSearchDataWithRetry(params, requestId, controller, { retryEmpty: true });
     if (!data) return;
     if (requestId !== state.searchRequestId) return;
     state.currentResults = data.list || [];
     
-    if (page === 1) {
+    if (params.page === 1) {
       state.totalCount = data.total || 0;
     }
     
@@ -1133,6 +1162,7 @@ async function fetchPage(page, requestId = state.searchRequestId) {
   } finally {
     if (requestId === state.searchRequestId) {
       state.isLoading = false;
+      state.loadingMode = '';
       if (state.searchAbortController === controller) {
         state.searchAbortController = null;
       }
@@ -1143,30 +1173,42 @@ async function fetchPage(page, requestId = state.searchRequestId) {
 // Fetch Next Page (Waterfall Lazy Load Appender)
 async function loadNextPage() {
   const requestId = state.searchRequestId;
+  if (state.searchAbortController) {
+    state.searchAbortController.abort();
+  }
   state.isLoading = true;
-  state.currentPage += 1;
+  const nextPage = state.currentPage + 1;
+  const params = getSearchParams(nextPage);
+  const controller = new AbortController();
+  state.searchAbortController = controller;
+  state.loadingMode = 'page';
   
   showBottomLoadingIndicator(true);
 
   try {
-    const data = await fetchSearchData(state.currentPage);
+    const data = await fetchSearchDataWithRetry(params, requestId, controller, { retryEmpty: false });
+    if (!data) return;
     if (requestId !== state.searchRequestId) return;
     const newSongs = data.list || [];
     
     if (newSongs.length === 0) {
       state.totalCount = state.currentResults.length; // Lock at current
     } else {
+      state.currentPage = nextPage;
       state.currentResults = [...state.currentResults, ...newSongs];
       appendSearchResults(newSongs);
     }
   } catch (err) {
     if (requestId !== state.searchRequestId) return;
     console.error('[Lazy Load Error]', err);
-    state.currentPage -= 1;
     showToast('获取更多歌曲失败', 'error');
   } finally {
     if (requestId === state.searchRequestId) {
       state.isLoading = false;
+      state.loadingMode = '';
+      if (state.searchAbortController === controller) {
+        state.searchAbortController = null;
+      }
       showBottomLoadingIndicator(false);
     }
   }
@@ -1253,8 +1295,9 @@ function appendSearchResults(songs) {
       </div>
     `;
 
-    item.querySelector('.download-btn').addEventListener('click', (e) => {
+    item.querySelector('.download-progress-wrapper').addEventListener('click', (e) => {
       e.stopPropagation();
+      if (e.currentTarget.classList.contains('downloading')) return;
       openDownloadModal(song);
     });
 

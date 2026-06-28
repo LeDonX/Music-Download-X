@@ -55,15 +55,44 @@ function createSearchResponse(payload, headers) {
   });
 }
 
+const UPSTREAM_SEARCH_TIMEOUT_MS = 3000;
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = UPSTREAM_SEARCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const parentSignal = options.signal;
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error(`upstream timeout after ${timeoutMs}ms`));
+  }, timeoutMs);
+  const abortFromParent = () => controller.abort(parentSignal.reason);
+
+  if (parentSignal?.aborted) {
+    abortFromParent();
+  } else {
+    parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+  }
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+    parentSignal?.removeEventListener('abort', abortFromParent);
+  }
+}
+
 async function retry(fn, maxRetries = 3) {
   let lastError;
   for (let i = 0; i < maxRetries; i++) {
+    const startedAt = Date.now();
     try {
       const result = await fn(i);
       if (result) return result;
+      lastError = new Error('empty upstream search response');
     } catch (err) {
       lastError = err;
-      console.warn(`[Search Retry] attempt ${i + 1} failed:`, err);
+      console.warn(`[Search Retry] attempt ${i + 1}/${maxRetries} failed after ${Date.now() - startedAt}ms:`, err?.message || err);
     }
     await new Promise(resolve => setTimeout(resolve, 80 * (i + 1)));
   }
@@ -230,7 +259,7 @@ export async function onRequestGet(context) {
     if (source === "wy") {
       const url = `https://music.163.com/api/cloudsearch/pc?s=${encodeURIComponent(keyword)}&type=1&offset=${(page - 1) * limit}&limit=${limit}`;
       const json = await retry(async () => {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://music.163.com/"
@@ -322,7 +351,7 @@ export async function onRequestGet(context) {
         const sign = await zzcSign(payloadStr);
         const url = `https://u.y.qq.com/cgi-bin/musics.fcg?sign=${sign}`;
 
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           method: "POST",
           headers: {
             "User-Agent": "QQMusic 14090508(android 12)",
@@ -368,7 +397,7 @@ export async function onRequestGet(context) {
     } else if (source === "kw") {
       const url = `http://search.kuwo.cn/r.s?client=kt&all=${encodeURIComponent(keyword)}&pn=${page - 1}&rn=${limit}&uid=794762570&ver=kwplayer_ar_9.2.2.1&vipver=1&show_copyright_off=1&newver=1&ft=music&cluster=0&strategy=2012&encoding=utf8&rformat=json&vermerge=1&mobi=1&issubtitle=1`;
       const json = await retry(async () => {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
           }
@@ -430,7 +459,7 @@ export async function onRequestGet(context) {
     } else if (source === "kg") {
       const url = `https://songsearch.kugou.com/song_search_v2?keyword=${encodeURIComponent(keyword)}&page=${page}&pagesize=${limit}&userid=0&clientver=&platform=WebFilter&filter=2&iscorrection=1&privilege_filter=0&area_code=1`;
       const json = await retry(async () => {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
           }
@@ -441,14 +470,20 @@ export async function onRequestGet(context) {
       }, 3);
       const rawList = json.data?.lists || [];
       const total = json.data?.total || 0;
-      const list = rawList.map((item) => {
+      const seen = new Set();
+      const list = [];
+      const addKugouItem = (item) => {
+        if (!item) return;
+        const itemKey = `${item.Audioid || ""}_${item.FileHash || ""}`;
+        if (seen.has(itemKey)) return;
+        seen.add(itemKey);
         const types = [];
         const _types = {};
         addQuality(types, _types, "128k", item.FileSize || 1.2 * 1024 * 1024, { hash: item.FileHash });
         addQuality(types, _types, "320k", item.HQFileSize, { hash: item.HQFileHash });
         addQuality(types, _types, "flac", item.SQFileSize, { hash: item.SQFileHash });
         addQuality(types, _types, "flac24bit", item.ResFileSize, { hash: item.ResFileHash });
-        return {
+        list.push({
           songmid: item.Audioid ? item.Audioid.toString() : item.FileHash,
           name: decodeHTML(item.SongName.replace(/<em>|<\/em>/g, "")),
           singer: decodeHTML(item.SingerName.replace(/<em>|<\/em>/g, "")),
@@ -461,7 +496,11 @@ export async function onRequestGet(context) {
           types,
           _types,
           typeUrl: {}
-        };
+        });
+      };
+      rawList.forEach((item) => {
+        addKugouItem(item);
+        (item.Grp || []).forEach(addKugouItem);
       });
       return createSearchResponse({ list, total, page, limit, allPage: Math.ceil(total / limit), source: "kg" }, responseHeaders);
     } else if (source === "mg") {
@@ -469,7 +508,7 @@ export async function onRequestGet(context) {
       const signData = createMiguSignature(time, keyword);
       const url = `https://jadeite.migu.cn/music_search/v3/search/searchAll?isCorrect=0&isCopyright=1&searchSwitch=%7B%22song%22%3A1%2C%22album%22%3A0%2C%22singer%22%3A0%2C%22tagSong%22%3A1%2C%22mvSong%22%3A0%2C%22bestShow%22%3A1%2C%22songlist%22%3A0%2C%22lyricSong%22%3A0%7D&pageSize=${limit}&text=${encodeURIComponent(keyword)}&pageNo=${page}&sort=0&sid=USS`;
       const json = await retry(async () => {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
           headers: {
             "uiVersion": "A_music_3.6.1",
             "deviceId": signData.deviceId,
