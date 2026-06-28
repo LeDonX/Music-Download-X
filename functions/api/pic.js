@@ -64,6 +64,23 @@ async function getKuwoPic(searchParams) {
   return /^https?:\/\//i.test(body) ? body : '';
 }
 
+function getDirectPic(searchParams) {
+  const source = searchParams.get('source') || '';
+  const albumId = searchParams.get('albumId') || '';
+  const songmid = searchParams.get('songmid') || '';
+  const img = searchParams.get('img') || '';
+
+  if (/^https?:\/\//i.test(img)) return img;
+
+  if (source === 'tx' && albumId) {
+    return `https://y.gtimg.cn/music/photo_new/T002R500x500M000${albumId}.jpg`;
+  }
+
+  if (source === 'mg' && img) return `http://d.musicapp.migu.cn${img}`;
+
+  return '';
+}
+
 export async function onRequestGet(context) {
   const { searchParams } = new URL(context.request.url);
   const source = searchParams.get('source') || '';
@@ -74,6 +91,8 @@ export async function onRequestGet(context) {
       img = await getKugouPic(searchParams);
     } else if (source === 'kw') {
       img = await getKuwoPic(searchParams);
+    } else if (['tx', 'wy', 'mg'].includes(source)) {
+      img = getDirectPic(searchParams);
     } else {
       return new Response(JSON.stringify({ error: 'Unsupported source' }), {
         status: 400,

@@ -240,12 +240,6 @@ function getDownloadMediaInfo(contentType, selectedQuality, resolvedQuality, url
   };
 }
 
-function shouldRejectQualityMismatch(mediaInfo) {
-  if (!mediaInfo.isQualityChanged) return false;
-  if (ORDERED_QUALITIES.has(mediaInfo.actualQuality)) return true;
-  return mediaInfo.selectedQuality.startsWith('flac') && mediaInfo.actualExt !== 'flac';
-}
-
 function getResolverName(url) {
   const key = url.split('/').slice(-2, -1)[0] || '';
   return key === 'lx' ? '默认解析服务' : '备用解析服务';
@@ -503,11 +497,6 @@ async function createDownloadResponseFromResolution(resolution, quality, filenam
   }
 
   const mediaInfo = getDownloadMediaInfo(response.headers.get('Content-Type') || '', quality, resolution.resolvedQuality, resolution.audioUrl);
-  if (shouldRejectQualityMismatch(mediaInfo)) {
-    if (response.body) await response.body.cancel().catch(() => {});
-    throw new Error(`解析规格不一致：选择 ${formatQualityLabel(mediaInfo.selectedQuality)}，实际 ${formatQualityLabel(mediaInfo.actualQuality)}`);
-  }
-
   return { response, resolution, mediaInfo };
 }
 
@@ -561,6 +550,14 @@ function uint32be(size) {
   ];
 }
 
+function uint24be(size) {
+  return [
+    (size >> 16) & 0xff,
+    (size >> 8) & 0xff,
+    size & 0xff,
+  ];
+}
+
 function concatUint8Arrays(arrays) {
   const total = arrays.reduce((sum, item) => sum + item.length, 0);
   const output = new Uint8Array(total);
@@ -570,6 +567,37 @@ function concatUint8Arrays(arrays) {
     offset += item.length;
   }
   return output;
+}
+
+function stringToLatin1Bytes(text) {
+  const value = String(text || '');
+  const bytes = new Uint8Array(value.length);
+  for (let i = 0; i < value.length; i++) {
+    bytes[i] = value.charCodeAt(i) & 0xff;
+  }
+  return bytes;
+}
+
+async function convertImageToJpegBytes(bytes, mimeType) {
+  if (/^image\/jpe?g$/i.test(mimeType) || /^image\/png$/i.test(mimeType)) {
+    return { bytes, mimeType: mimeType.replace('image/jpg', 'image/jpeg') };
+  }
+
+  const blob = new Blob([bytes], { type: mimeType || 'image/webp' });
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close?.();
+
+  const jpegBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
+  if (!jpegBlob) return null;
+  return {
+    bytes: new Uint8Array(await jpegBlob.arrayBuffer()),
+    mimeType: 'image/jpeg',
+  };
 }
 
 function createTextFrame(id, text) {
@@ -630,12 +658,14 @@ async function fetchCoverBytes(song) {
     const res = await fetch(getImageProxyUrl(coverUrl), { cache: 'force-cache' });
     if (!res.ok) return null;
     const contentType = res.headers.get('Content-Type') || 'image/jpeg';
-    if (!/^image\/(jpeg|jpg|png)$/i.test(contentType)) return null;
+    if (!/^image\//i.test(contentType)) return null;
     const bytes = new Uint8Array(await res.arrayBuffer());
     if (!bytes.length) return null;
+    const normalized = await convertImageToJpegBytes(bytes, contentType.split(';')[0]);
+    if (!normalized?.bytes?.length) return null;
     return {
-      bytes,
-      mimeType: contentType.replace('image/jpg', 'image/jpeg').split(';')[0],
+      bytes: normalized.bytes,
+      mimeType: normalized.mimeType,
       url: coverUrl,
     };
   } catch (err) {
@@ -666,9 +696,72 @@ async function embedMp3Metadata(audioBytes, song) {
   return concatUint8Arrays([header, frameBytes, stripExistingId3(audioBytes)]);
 }
 
+function createFlacPictureBlock(cover, isLast = true) {
+  if (!cover?.bytes?.length || !cover.mimeType) return null;
+  const mimeBytes = stringToLatin1Bytes(cover.mimeType);
+  const descBytes = new Uint8Array(0);
+  const body = concatUint8Arrays([
+    new Uint8Array(uint32be(3)),
+    new Uint8Array(uint32be(mimeBytes.length)),
+    mimeBytes,
+    new Uint8Array(uint32be(descBytes.length)),
+    descBytes,
+    new Uint8Array(uint32be(0)),
+    new Uint8Array(uint32be(0)),
+    new Uint8Array(uint32be(0)),
+    new Uint8Array(uint32be(0)),
+    new Uint8Array(uint32be(cover.bytes.length)),
+    cover.bytes,
+  ]);
+
+  return concatUint8Arrays([
+    new Uint8Array([(isLast ? 0x80 : 0x00) | 0x06, ...uint24be(body.length)]),
+    body,
+  ]);
+}
+
+async function embedFlacCover(audioBytes, song) {
+  if (
+    audioBytes.length < 8 ||
+    audioBytes[0] !== 0x66 ||
+    audioBytes[1] !== 0x4c ||
+    audioBytes[2] !== 0x61 ||
+    audioBytes[3] !== 0x43
+  ) {
+    return audioBytes;
+  }
+
+  const cover = await fetchCoverBytes(song);
+  const pictureBlock = createFlacPictureBlock(cover, true);
+  if (!pictureBlock) return audioBytes;
+
+  const firstHeaderOffset = 4;
+  const firstBlockType = audioBytes[firstHeaderOffset] & 0x7f;
+  const firstBlockLength = (audioBytes[firstHeaderOffset + 1] << 16) | (audioBytes[firstHeaderOffset + 2] << 8) | audioBytes[firstHeaderOffset + 3];
+  const firstBlockEnd = firstHeaderOffset + 4 + firstBlockLength;
+  if (firstBlockEnd > audioBytes.length) return audioBytes;
+
+  const firstHeader = audioBytes.slice(firstHeaderOffset, firstHeaderOffset + 4);
+  firstHeader[0] = firstBlockType;
+
+  return concatUint8Arrays([
+    audioBytes.slice(0, firstHeaderOffset),
+    firstHeader,
+    audioBytes.slice(firstHeaderOffset + 4, firstBlockEnd),
+    pictureBlock,
+    audioBytes.slice(firstBlockEnd),
+  ]);
+}
+
+async function embedAudioMetadata(audioBytes, song, ext) {
+  if (ext === 'mp3') return embedMp3Metadata(audioBytes, song);
+  if (ext === 'flac') return embedFlacCover(audioBytes, song);
+  return audioBytes;
+}
+
 async function getBestCoverUrl(song) {
-  if (!['kw', 'kg'].includes(song.source)) {
-    return song.img && /^https?:\/\//i.test(song.img) ? song.img : '';
+  if (song.img && /^https?:\/\//i.test(song.img)) {
+    return song.img;
   }
 
   try {
@@ -679,6 +772,7 @@ async function getBestCoverUrl(song) {
       hash: song.hash || '',
       name: song.name || '',
       singer: song.singer || '',
+      img: song.img || '',
     });
     const res = await fetch(`/api/pic?${params.toString()}`, { cache: 'force-cache' });
     if (!res.ok) return '';
@@ -1059,13 +1153,13 @@ function appendSearchResults(songs) {
     item.className = 'song-item';
     item.id = `song-item-${globalIdx}`;
 
-    const shouldLazyLoadCover = ['kw', 'kg'].includes(song.source) && !song.img;
     const coverUrl = getImageProxyUrl(song.img);
+    const hasCover = Boolean(coverUrl);
 
     item.innerHTML = `
       <div class="song-cover-wrapper">
-        <div class="song-cover-placeholder">♪</div>
-        <img class="song-cover" src="${coverUrl}" alt="Cover" style="${coverUrl ? 'display:block;' : 'display:none;'}">
+        <div class="song-cover-placeholder" style="${hasCover ? 'display:none;' : ''}">♪</div>
+        <img class="song-cover" src="${coverUrl}" alt="Cover" style="${hasCover ? 'display:block;' : 'display:none;'}">
       </div>
       <div class="song-info">
         <div class="song-title">${escapeHtml(song.name)}</div>
@@ -1095,8 +1189,16 @@ function appendSearchResults(songs) {
 
     el.songList.appendChild(item);
 
-    if (shouldLazyLoadCover) {
-      lazyLoadCover(song, item.querySelector('.song-cover'), item.querySelector('.song-cover-placeholder'), globalIdx);
+    const imgEl = item.querySelector('.song-cover');
+    const placeholderEl = item.querySelector('.song-cover-placeholder');
+    if (hasCover) {
+      imgEl.addEventListener('error', () => {
+        imgEl.style.display = 'none';
+        placeholderEl.style.display = 'flex';
+        lazyLoadCover(song, imgEl, placeholderEl, globalIdx);
+      }, { once: true });
+    } else {
+      lazyLoadCover(song, imgEl, placeholderEl, globalIdx);
     }
   });
 }
@@ -1110,6 +1212,7 @@ async function lazyLoadCover(song, imgEl, placeholderEl, idx) {
       hash: song.hash || '',
       name: song.name || '',
       singer: song.singer || '',
+      img: song.img || '',
     });
     const res = await fetch(`/api/pic?${params.toString()}`, { cache: 'force-cache' });
     if (!res.ok) return;
@@ -1259,13 +1362,11 @@ async function startDownloadTask(song, quality) {
       qualityWarnText = ` (实际下载为 ${formatQualityLabel(actualQuality)})`;
     }
 
-    statusText.innerText = actualExt === 'mp3' ? '正在写入封面与歌曲信息...' : '正在写入本地磁盘...';
+    statusText.innerText = ['mp3', 'flac'].includes(actualExt) ? '正在写入封面与歌曲信息...' : '正在写入本地磁盘...';
     statusText.className = 'queue-status completed';
 
     let fileBytes = concatUint8Arrays(chunks);
-    if (actualExt === 'mp3') {
-      fileBytes = await embedMp3Metadata(fileBytes, resolvedSong);
-    }
+    fileBytes = await embedAudioMetadata(fileBytes, resolvedSong, actualExt);
 
     const blob = new Blob([fileBytes], { type: contentType || 'application/octet-stream' });
     const blobUrl = URL.createObjectURL(blob);
