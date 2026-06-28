@@ -21,8 +21,6 @@ const PLATFORM_NAMES = {
 const SEARCH_TIMEOUT_MS = 18000;
 const SEARCH_EMPTY_RETRY_LIMIT = 3;
 const SEARCH_RETRY_DELAYS = [250, 700, 1400];
-const COVER_FETCH_TIMEOUT_MS = 3500;
-const COVER_EMBED_WAIT_MS = 1200;
 const ORDERED_QUALITIES = new Set(['128k', '320k', 'flac', 'flac24bit']);
 
 // Application State
@@ -508,40 +506,43 @@ async function resolveWithScripts(song, quality, statusText, validateResolution)
   throw new Error('解析服务未返回有效链接');
 }
 
-async function createDownloadResponseFromResolution(resolution, quality, filename, statusText) {
+async function buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText) {
   const sourceName = getResolverName(resolution.successfulUrl);
-  statusText.innerText = `[${sourceName}] 正在建立连接...`;
+  statusText.innerText = `[${sourceName}] 正在准备下载...`;
 
-  const response = await fetch('/api/download', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      url: resolution.audioUrl,
-      filename,
-      headers: resolution.audioHeaders
-    })
+  const mediaInfo = getDownloadMediaInfo('', quality, resolution.resolvedQuality, resolution.audioUrl);
+  const finalExt = mediaInfo.actualExt || getDefaultExtensionForQuality(mediaInfo.actualQuality || quality);
+  const finalFilename = buildSongFilename(song, finalExt);
+  const coverUrl = await getBestCoverUrl(song);
+  const params = new URLSearchParams({
+    url: resolution.audioUrl,
+    filename: finalFilename,
+    headers: JSON.stringify(resolution.audioHeaders || {}),
+    title: song.name || '',
+    artist: song.singer || '',
+    album: song.albumName || '',
+    cover: coverUrl || '',
+    ext: finalExt,
   });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(detail || `流式代理连接失败 (${response.status})`);
-  }
 
-  const mediaInfo = getDownloadMediaInfo(response.headers.get('Content-Type') || '', quality, resolution.resolvedQuality, resolution.audioUrl);
-  return { response, resolution, mediaInfo };
+  return {
+    downloadUrl: `/api/download?${params.toString()}`,
+    resolution,
+    mediaInfo,
+    finalFilename,
+  };
 }
 
-async function createDownloadResponse(song, quality, filename, statusText) {
+async function createDownloadLink(song, quality, filename, statusText) {
   return resolveWithScripts(song, quality, statusText, (resolution) => {
-    return createDownloadResponseFromResolution(resolution, quality, filename, statusText);
+    return buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText);
   });
 }
 
-async function createDownloadResponseWithFallback(song, quality, filename, statusText) {
+async function createDownloadLinkWithFallback(song, quality, filename, statusText) {
   let lastError = null;
   try {
-    return await createDownloadResponse(song, quality, filename, statusText);
+    return await createDownloadLink(song, quality, filename, statusText);
   } catch (err) {
     lastError = err;
     console.warn('[Download] original source failed:', err.message);
@@ -554,7 +555,7 @@ async function createDownloadResponseWithFallback(song, quality, filename, statu
   for (const candidate of alternatives) {
     try {
       statusText.innerText = `正在尝试 ${getPlatformName(candidate.source)}...`;
-      return await createDownloadResponse(candidate, quality, filename, statusText);
+      return await createDownloadLink(candidate, quality, filename, statusText);
     } catch (err) {
       lastError = err;
       console.warn(`[Download] fallback ${candidate.source} failed:`, err.message);
@@ -562,251 +563,6 @@ async function createDownloadResponseWithFallback(song, quality, filename, statu
   }
 
   throw lastError || new Error('所有平台均解析失败');
-}
-
-function syncsafe(size) {
-  return [
-    (size >> 21) & 0x7f,
-    (size >> 14) & 0x7f,
-    (size >> 7) & 0x7f,
-    size & 0x7f,
-  ];
-}
-
-function uint32be(size) {
-  return [
-    (size >> 24) & 0xff,
-    (size >> 16) & 0xff,
-    (size >> 8) & 0xff,
-    size & 0xff,
-  ];
-}
-
-function uint24be(size) {
-  return [
-    (size >> 16) & 0xff,
-    (size >> 8) & 0xff,
-    size & 0xff,
-  ];
-}
-
-function concatUint8Arrays(arrays) {
-  const total = arrays.reduce((sum, item) => sum + item.length, 0);
-  const output = new Uint8Array(total);
-  let offset = 0;
-  for (const item of arrays) {
-    output.set(item, offset);
-    offset += item.length;
-  }
-  return output;
-}
-
-function stringToLatin1Bytes(text) {
-  const value = String(text || '');
-  const bytes = new Uint8Array(value.length);
-  for (let i = 0; i < value.length; i++) {
-    bytes[i] = value.charCodeAt(i) & 0xff;
-  }
-  return bytes;
-}
-
-async function convertImageToJpegBytes(bytes, mimeType) {
-  if (/^image\/jpe?g$/i.test(mimeType) || /^image\/png$/i.test(mimeType)) {
-    return { bytes, mimeType: mimeType.replace('image/jpg', 'image/jpeg') };
-  }
-
-  const blob = new Blob([bytes], { type: mimeType || 'image/webp' });
-  const bitmap = await createImageBitmap(blob);
-  const canvas = document.createElement('canvas');
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(bitmap, 0, 0);
-  bitmap.close?.();
-
-  const jpegBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.92));
-  if (!jpegBlob) return null;
-  return {
-    bytes: new Uint8Array(await jpegBlob.arrayBuffer()),
-    mimeType: 'image/jpeg',
-  };
-}
-
-function createTextFrame(id, text) {
-  const value = String(text || '').trim();
-  if (!value) return null;
-  const payload = new Uint8Array(value.length * 2 + 2);
-  payload[0] = 0xff;
-  payload[1] = 0xfe;
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    payload[i * 2 + 2] = code & 0xff;
-    payload[i * 2 + 3] = code >> 8;
-  }
-  const content = concatUint8Arrays([new Uint8Array([0x01]), payload]);
-  return concatUint8Arrays([
-    new TextEncoder().encode(id),
-    new Uint8Array(uint32be(content.length)),
-    new Uint8Array([0, 0]),
-    content,
-  ]);
-}
-
-function createApicFrame(imageBytes, mimeType) {
-  if (!imageBytes?.length || !mimeType) return null;
-  const mime = new TextEncoder().encode(mimeType);
-  const content = concatUint8Arrays([
-    new Uint8Array([0x00]),
-    mime,
-    new Uint8Array([0x00, 0x03]),
-    new Uint8Array([0x00]),
-    imageBytes,
-  ]);
-  return concatUint8Arrays([
-    new TextEncoder().encode('APIC'),
-    new Uint8Array(uint32be(content.length)),
-    new Uint8Array([0, 0]),
-    content,
-  ]);
-}
-
-function stripExistingId3(bytes) {
-  if (
-    bytes.length > 10 &&
-    bytes[0] === 0x49 &&
-    bytes[1] === 0x44 &&
-    bytes[2] === 0x33
-  ) {
-    const size = (bytes[6] << 21) | (bytes[7] << 14) | (bytes[8] << 7) | bytes[9];
-    return bytes.slice(10 + size);
-  }
-  return bytes;
-}
-
-async function fetchCoverBytes(song) {
-  const coverUrl = await getBestCoverUrl(song);
-  if (!coverUrl) return null;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(new Error('cover timeout')), COVER_FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(getImageProxyUrl(coverUrl), {
-      cache: 'force-cache',
-      signal: controller.signal,
-    });
-    if (!res.ok) return null;
-    const contentType = res.headers.get('Content-Type') || 'image/jpeg';
-    if (!/^image\//i.test(contentType)) return null;
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    if (!bytes.length) return null;
-    const normalized = await convertImageToJpegBytes(bytes, contentType.split(';')[0]);
-    if (!normalized?.bytes?.length) return null;
-    return {
-      bytes: normalized.bytes,
-      mimeType: normalized.mimeType,
-      url: coverUrl,
-    };
-  } catch (err) {
-    console.warn('[Download] cover fetch failed:', err.message);
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-function waitForPromise(promise, timeoutMs) {
-  let timeoutId;
-  const timeout = new Promise(resolve => {
-    timeoutId = setTimeout(() => resolve(null), timeoutMs);
-  });
-  return Promise.race([
-    promise.catch(() => null),
-    timeout,
-  ]).finally(() => clearTimeout(timeoutId));
-}
-
-async function embedMp3Metadata(audioBytes, song, coverPromise = null) {
-  const frames = [
-    createTextFrame('TIT2', song.name),
-    createTextFrame('TPE1', String(song.singer || '').replace(/、/g, ';')),
-    createTextFrame('TALB', song.albumName),
-  ].filter(Boolean);
-
-  const cover = coverPromise ? await waitForPromise(coverPromise, COVER_EMBED_WAIT_MS) : await fetchCoverBytes(song);
-  const apic = cover ? createApicFrame(cover.bytes, cover.mimeType) : null;
-  if (apic) frames.push(apic);
-  if (!frames.length) return audioBytes;
-
-  const frameBytes = concatUint8Arrays(frames);
-  const header = concatUint8Arrays([
-    new TextEncoder().encode('ID3'),
-    new Uint8Array([0x03, 0x00, 0x00]),
-    new Uint8Array(syncsafe(frameBytes.length)),
-  ]);
-
-  return concatUint8Arrays([header, frameBytes, stripExistingId3(audioBytes)]);
-}
-
-function createFlacPictureBlock(cover, isLast = true) {
-  if (!cover?.bytes?.length || !cover.mimeType) return null;
-  const mimeBytes = stringToLatin1Bytes(cover.mimeType);
-  const descBytes = new Uint8Array(0);
-  const body = concatUint8Arrays([
-    new Uint8Array(uint32be(3)),
-    new Uint8Array(uint32be(mimeBytes.length)),
-    mimeBytes,
-    new Uint8Array(uint32be(descBytes.length)),
-    descBytes,
-    new Uint8Array(uint32be(0)),
-    new Uint8Array(uint32be(0)),
-    new Uint8Array(uint32be(0)),
-    new Uint8Array(uint32be(0)),
-    new Uint8Array(uint32be(cover.bytes.length)),
-    cover.bytes,
-  ]);
-
-  return concatUint8Arrays([
-    new Uint8Array([(isLast ? 0x80 : 0x00) | 0x06, ...uint24be(body.length)]),
-    body,
-  ]);
-}
-
-async function embedFlacCover(audioBytes, song, coverPromise = null) {
-  if (
-    audioBytes.length < 8 ||
-    audioBytes[0] !== 0x66 ||
-    audioBytes[1] !== 0x4c ||
-    audioBytes[2] !== 0x61 ||
-    audioBytes[3] !== 0x43
-  ) {
-    return audioBytes;
-  }
-
-  const cover = coverPromise ? await waitForPromise(coverPromise, COVER_EMBED_WAIT_MS) : await fetchCoverBytes(song);
-  const pictureBlock = createFlacPictureBlock(cover, true);
-  if (!pictureBlock) return audioBytes;
-
-  const firstHeaderOffset = 4;
-  const firstBlockType = audioBytes[firstHeaderOffset] & 0x7f;
-  const firstBlockLength = (audioBytes[firstHeaderOffset + 1] << 16) | (audioBytes[firstHeaderOffset + 2] << 8) | audioBytes[firstHeaderOffset + 3];
-  const firstBlockEnd = firstHeaderOffset + 4 + firstBlockLength;
-  if (firstBlockEnd > audioBytes.length) return audioBytes;
-
-  const firstHeader = audioBytes.slice(firstHeaderOffset, firstHeaderOffset + 4);
-  firstHeader[0] = firstBlockType;
-
-  return concatUint8Arrays([
-    audioBytes.slice(0, firstHeaderOffset),
-    firstHeader,
-    audioBytes.slice(firstHeaderOffset + 4, firstBlockEnd),
-    pictureBlock,
-    audioBytes.slice(firstBlockEnd),
-  ]);
-}
-
-async function embedAudioMetadata(audioBytes, song, ext, coverPromise = null) {
-  if (ext === 'mp3') return embedMp3Metadata(audioBytes, song, coverPromise);
-  if (ext === 'flac') return embedFlacCover(audioBytes, song, coverPromise);
-  return audioBytes;
 }
 
 async function getBestCoverUrl(song) {
@@ -1445,63 +1201,16 @@ async function startDownloadTask(song, quality) {
     statusText.innerText = '正在解析链接...';
     updateDownloadProgressOnCard(song.songmid, song.source, 5);
 
-    const { response, resolution } = await createDownloadResponseWithFallback(song, quality, displayFilename, statusText);
+    const { downloadUrl, resolution, mediaInfo, finalFilename } = await createDownloadLinkWithFallback(song, quality, displayFilename, statusText);
     const resolvedSong = resolution.resolvedSong;
     const usedFallback = resolvedSong.source !== song.source || resolvedSong.songmid !== song.songmid;
-
-    const contentType = response.headers.get('Content-Type') || '';
-    const contentLengthHeader = response.headers.get('X-Content-Length') || response.headers.get('Content-Length');
-    const contentLength = parseInt(contentLengthHeader || '0', 10);
-    
-    const resolverQuality = normalizeQualityType(resolution.resolvedQuality);
-    const actualExt = getExtensionFromMedia(contentType, getDefaultExtensionForQuality(resolverQuality || selectedQuality), resolution.audioUrl);
-    const actualQuality = getActualQuality(selectedQuality, resolverQuality, actualExt);
+    const actualQuality = mediaInfo.actualQuality;
     const isQualityChanged = Boolean(actualQuality) && actualQuality !== selectedQuality;
 
-    // Build the finalized file name
-    const finalFilename = buildSongFilename(resolvedSong, actualExt);
     const nameEl = taskEl.querySelector('.queue-name');
     if (nameEl) {
       nameEl.innerText = finalFilename;
       nameEl.title = finalFilename;
-    }
-
-    const shouldEmbedCover = ['mp3', 'flac'].includes(actualExt);
-    const coverPromise = shouldEmbedCover ? fetchCoverBytes(resolvedSong) : null;
-
-    if (contentLength) {
-      sizeText.innerText = formatBytes(contentLength);
-    } else {
-      sizeText.innerText = '未知大小';
-    }
-
-    statusText.innerText = '正在下载...';
-    
-    // Read Binary Stream with progress updating
-    const reader = response.body.getReader();
-    let receivedLength = 0;
-    const chunks = [];
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      chunks.push(value);
-      receivedLength += value.length;
-
-      if (contentLength) {
-        const pct = Math.round((receivedLength / contentLength) * 100);
-        progressFill.style.width = `${pct}%`;
-        pctText.innerText = `${pct}%`;
-        updateDownloadProgressOnCard(song.songmid, song.source, pct);
-      } else {
-        pctText.innerText = formatBytes(receivedLength);
-        updateDownloadProgressOnCard(song.songmid, song.source, 50);
-      }
-    }
-
-    if (contentLength && receivedLength < contentLength) {
-      throw new Error(`下载中断，仅接收了 ${formatBytes(receivedLength)} / ${formatBytes(contentLength)}`);
     }
 
     let qualityWarnText = '';
@@ -1509,26 +1218,17 @@ async function startDownloadTask(song, quality) {
       qualityWarnText = ` (实际下载为 ${formatQualityLabel(actualQuality)})`;
     }
 
-    statusText.innerText = shouldEmbedCover ? '正在写入封面与歌曲信息...' : '正在写入本地磁盘...';
+    statusText.innerText = '已交给浏览器下载' + qualityWarnText;
     statusText.className = 'queue-status completed';
-
-    let fileBytes = concatUint8Arrays(chunks);
-    fileBytes = await embedAudioMetadata(fileBytes, resolvedSong, actualExt, coverPromise);
-
-    const blob = new Blob([fileBytes], { type: contentType || 'application/octet-stream' });
-    const blobUrl = URL.createObjectURL(blob);
+    sizeText.innerText = '浏览器处理中';
     
     const a = document.createElement('a');
-    a.href = blobUrl;
+    a.href = downloadUrl;
     a.download = finalFilename;
     document.body.appendChild(a);
     a.click();
-    
-    // Cleanup
     document.body.removeChild(a);
-    URL.revokeObjectURL(blobUrl);
 
-    statusText.innerText = '下载完成' + qualityWarnText;
     progressFill.style.width = '100%';
     pctText.innerText = '100%';
     updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
@@ -1552,16 +1252,6 @@ async function startDownloadTask(song, quality) {
       statusText.className = 'queue-status failed';
     }
   }
-}
-
-// Utility Helpers
-function formatBytes(bytes, decimals = 2) {
-  if (bytes === 0) return '0 Bytes';
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
 // HTML Escaper helper
