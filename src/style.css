@@ -45,6 +45,7 @@ path,
 .preset-btn,
 .save-script-btn,
 .modal-close-btn,
+.wechat-download-btn,
 .download-progress-wrapper {
   -webkit-tap-highlight-color: transparent;
 }
@@ -70,6 +71,7 @@ button,
 .preset-btn,
 .save-script-btn,
 .modal-close-btn,
+.wechat-download-btn,
 .download-progress-wrapper {
   user-select: none;
   -webkit-user-select: none;
@@ -88,6 +90,7 @@ button *,
 .preset-btn *,
 .save-script-btn *,
 .modal-close-btn *,
+.wechat-download-btn *,
 .download-progress-wrapper * {
   pointer-events: none;
   user-select: none;
@@ -120,7 +123,8 @@ select:focus,
 .page-btn:focus,
 .preset-btn:focus,
 .save-script-btn:focus,
-.modal-close-btn:focus {
+.modal-close-btn:focus,
+.wechat-download-btn:focus {
   outline: none;
 }
 
@@ -688,6 +692,10 @@ body {
   font-weight: 600;
 }
 
+.queue-status.warning {
+  color: #b45309;
+}
+
 /* Quality Selection Modal */
 .modal-overlay {
   position: fixed;
@@ -743,6 +751,41 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.wechat-download-content .modal-song-name {
+  margin-bottom: 12px;
+}
+
+.wechat-download-tip {
+  font-size: 0.86rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+.wechat-download-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.wechat-download-btn {
+  flex: 1;
+  min-height: 42px;
+  border: 1px solid var(--card-border);
+  background: var(--bg-light);
+  color: var(--text-primary);
+  border-radius: 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.wechat-download-btn.primary {
+  background: var(--primary-accent);
+  border-color: var(--primary-accent);
+  color: var(--text-light);
 }
 
 .quality-options {
@@ -926,6 +969,7 @@ body {
   .preset-btn,
   .save-script-btn,
   .modal-close-btn,
+  .wechat-download-btn,
   .download-progress-wrapper {
     -webkit-tap-highlight-color: rgba(0, 0, 0, 0) !important;
     -webkit-touch-callout: none;
@@ -951,6 +995,8 @@ body {
   .save-script-btn:focus,
   .modal-close-btn:active,
   .modal-close-btn:focus,
+  .wechat-download-btn:active,
+  .wechat-download-btn:focus,
   .download-progress-wrapper:active {
     -webkit-tap-highlight-color: transparent;
     box-shadow: none;

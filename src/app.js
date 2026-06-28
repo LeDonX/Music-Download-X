@@ -269,6 +269,81 @@ function getImageProxyUrl(url) {
   return `/api/image?url=${encodeURIComponent(url)}`;
 }
 
+function isWeChatBrowser() {
+  return /MicroMessenger/i.test(navigator.userAgent || '');
+}
+
+function toAbsoluteUrl(url) {
+  return new URL(url, window.location.href).toString();
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!copied) throw new Error('复制失败');
+}
+
+function closeWeChatDownloadModal() {
+  document.getElementById('wechatDownloadModal')?.remove();
+}
+
+function showWeChatDownloadModal(downloadUrl, filename) {
+  const absoluteUrl = toAbsoluteUrl(downloadUrl);
+  closeWeChatDownloadModal();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'wechatDownloadModal';
+  overlay.className = 'modal-overlay active wechat-download-modal';
+  overlay.innerHTML = `
+    <div class="glass-panel modal-content wechat-download-content">
+      <h3 class="modal-title">微信内无法直接下载</h3>
+      <div class="modal-song-name" title="${escapeHtml(filename)}">${escapeHtml(filename)}</div>
+      <p class="wechat-download-tip">请点击右上角菜单选择在浏览器打开，或复制链接到系统浏览器下载。</p>
+      <div class="wechat-download-actions">
+        <button class="wechat-download-btn primary" type="button" data-action="copy">复制下载链接</button>
+        <button class="wechat-download-btn" type="button" data-action="open">尝试打开链接</button>
+      </div>
+      <button class="modal-close-btn" type="button" data-action="close">关闭</button>
+    </div>
+  `;
+
+  overlay.addEventListener('click', async (e) => {
+    const action = e.target?.getAttribute?.('data-action');
+    if (e.target === overlay || action === 'close') {
+      closeWeChatDownloadModal();
+      return;
+    }
+    if (action === 'copy') {
+      try {
+        await copyTextToClipboard(absoluteUrl);
+        showToast('下载链接已复制，请在系统浏览器打开', 'success');
+      } catch (err) {
+        showToast('复制失败，请使用右上角在浏览器打开', 'error');
+      }
+      return;
+    }
+    if (action === 'open') {
+      window.location.href = absoluteUrl;
+    }
+  });
+
+  document.body.appendChild(overlay);
+  return absoluteUrl;
+}
+
 function buildPicParams(song) {
   return new URLSearchParams({
     source: song.source,
@@ -1228,6 +1303,18 @@ async function startDownloadTask(song, quality) {
     let qualityWarnText = '';
     if (isQualityChanged) {
       qualityWarnText = ` (实际下载为 ${formatQualityLabel(actualQuality)})`;
+    }
+
+    if (isWeChatBrowser()) {
+      showWeChatDownloadModal(downloadUrl, finalFilename);
+      statusText.innerText = '微信内无法直接下载' + qualityWarnText;
+      statusText.className = 'queue-status warning';
+      sizeText.innerText = '请复制链接或在浏览器打开';
+      progressFill.style.width = '100%';
+      pctText.innerText = '待处理';
+      updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
+      showToast('微信内无法直接下载，请在系统浏览器打开', 'warning');
+      return;
     }
 
     const a = document.createElement('a');
