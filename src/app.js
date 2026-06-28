@@ -18,6 +18,9 @@ const PLATFORM_NAMES = {
   wy: '网易云音乐',
   mg: '咪咕音乐',
 };
+const SEARCH_TIMEOUT_MS = 18000;
+const SEARCH_EMPTY_RETRY_LIMIT = 3;
+const SEARCH_RETRY_DELAYS = [250, 700, 1400];
 
 // Application State
 const state = {
@@ -33,6 +36,7 @@ const state = {
   isLoading: false,
   searchRequestId: 0,
   searchAbortController: null,
+  isInputComposing: false,
 };
 
 function buildQualityMap(song) {
@@ -258,6 +262,77 @@ async function fetchSourceSearch(keyword, source, limit = 25) {
   }
 }
 
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchSearchData(page, { signal } = {}) {
+  const searchUrl = `/api/search?keyword=${encodeURIComponent(state.currentKeyword)}&source=${state.currentSource}&page=${page}&limit=${state.limit}&_=${Date.now()}`;
+  const res = await fetch(searchUrl, {
+    signal,
+    cache: 'no-store',
+    headers: {
+      'Cache-Control': 'no-cache',
+    },
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(detail || `Search request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+function createAttemptSignal(parentSignal, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error('search timeout')), timeoutMs);
+  const abortFromParent = () => controller.abort(parentSignal.reason);
+
+  if (parentSignal?.aborted) {
+    abortFromParent();
+  } else {
+    parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timeoutId);
+      parentSignal?.removeEventListener('abort', abortFromParent);
+    },
+    wasParentAborted() {
+      return Boolean(parentSignal?.aborted);
+    },
+  };
+}
+
+async function fetchSearchDataWithRetry(page, requestId, controller) {
+  let lastData = null;
+  let lastError = null;
+  const maxAttempts = page === 1 ? SEARCH_EMPTY_RETRY_LIMIT + 1 : 1;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (requestId !== state.searchRequestId) return null;
+    const attemptSignal = createAttemptSignal(controller.signal, SEARCH_TIMEOUT_MS);
+    try {
+      const data = await fetchSearchData(page, { signal: attemptSignal.signal });
+      lastData = data;
+      const list = data.list || [];
+      if (page !== 1 || list.length || attempt === maxAttempts - 1) return data;
+    } catch (err) {
+      lastError = err;
+      if (attemptSignal.wasParentAborted() || requestId !== state.searchRequestId || attempt === maxAttempts - 1) throw err;
+    } finally {
+      attemptSignal.dispose();
+    }
+
+    el.resultsCount.innerText = `正在搜索... (${attempt + 2}/${maxAttempts})`;
+    await delay(SEARCH_RETRY_DELAYS[attempt] || SEARCH_RETRY_DELAYS[SEARCH_RETRY_DELAYS.length - 1]);
+  }
+
+  if (lastData) return lastData;
+  throw lastError || new Error('Search request failed');
+}
+
 async function findAlternativeSongs(song, quality) {
   const keyword = `${song.name || ''} ${song.singer || ''}`.trim();
   if (!keyword) return [];
@@ -439,8 +514,14 @@ async function init() {
 function setupEventListeners() {
   // Search actions
   el.searchBtn.addEventListener('click', performSearch);
+  el.searchInput.addEventListener('compositionstart', () => {
+    state.isInputComposing = true;
+  });
+  el.searchInput.addEventListener('compositionend', () => {
+    state.isInputComposing = false;
+  });
   el.searchInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') performSearch();
+    if (e.key === 'Enter' && !e.isComposing && !state.isInputComposing) performSearch();
   });
 
   // Toggle custom dropdown menu
@@ -607,11 +688,8 @@ async function fetchPage(page, requestId = state.searchRequestId) {
   el.resultsCount.innerText = '正在搜索...';
 
   try {
-    const searchUrl = `/api/search?keyword=${encodeURIComponent(state.currentKeyword)}&source=${state.currentSource}&page=${page}&limit=${state.limit}`;
-    const res = await fetch(searchUrl, { signal: controller.signal });
-    if (!res.ok) throw new Error('Search request failed');
-    
-    const data = await res.json();
+    const data = await fetchSearchDataWithRetry(page, requestId, controller);
+    if (!data) return;
     if (requestId !== state.searchRequestId) return;
     state.currentResults = data.list || [];
     
@@ -649,11 +727,7 @@ async function loadNextPage() {
   showBottomLoadingIndicator(true);
 
   try {
-    const searchUrl = `/api/search?keyword=${encodeURIComponent(state.currentKeyword)}&source=${state.currentSource}&page=${state.currentPage}&limit=${state.limit}`;
-    const res = await fetch(searchUrl);
-    if (!res.ok) throw new Error('Search request failed');
-    
-    const data = await res.json();
+    const data = await fetchSearchData(state.currentPage);
     if (requestId !== state.searchRequestId) return;
     const newSongs = data.list || [];
     

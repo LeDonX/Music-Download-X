@@ -184,7 +184,10 @@ export async function onRequestGet(context) {
   const limit = parseInt(searchParams.get("limit") || "30", 10);
   const responseHeaders = {
     "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*"
+    "Access-Control-Allow-Origin": "*",
+    "Cache-Control": "no-store, max-age=0",
+    "CDN-Cache-Control": "no-store",
+    "Pragma": "no-cache"
   };
   if (!keyword) {
     return new Response(JSON.stringify({ list: [], total: 0, page, limit }), {
