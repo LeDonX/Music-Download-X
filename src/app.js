@@ -915,36 +915,46 @@ function setupEventListeners() {
   el.clearSearchBtn.addEventListener('click', clearSearchInput);
   updateClearSearchButton();
 
+  const selectTrigger = el.customSelect.querySelector('.custom-select-trigger');
+
   // Toggle custom dropdown menu
-  el.customSelect.addEventListener('click', (e) => {
+  selectTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
     el.customSelect.classList.toggle('open');
   });
 
   // Handle custom option selection
   const options = el.customSelect.querySelectorAll('.custom-option');
-  options.forEach(option => {
-    option.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const value = option.getAttribute('data-value');
-      const text = option.innerText;
-      
-      // Update state
-      state.currentSource = value;
-      el.selectedPlatform.innerText = text;
-      
-      // Update active styling
-      options.forEach(opt => opt.classList.remove('active'));
-      option.classList.add('active');
-      
-      // Close menu
+  const selectPlatformOption = (option) => {
+    const value = option.getAttribute('data-value');
+    const text = option.innerText;
+    if (!value || value === state.currentSource) {
       el.customSelect.classList.remove('open');
-      
-      // Fire search if search input has keyword
-      if (el.searchInput.value.trim()) {
-        performSearch();
-      }
-    });
+      return;
+    }
+
+    state.currentSource = value;
+    el.selectedPlatform.innerText = text;
+
+    options.forEach(opt => opt.classList.remove('active'));
+    option.classList.add('active');
+
+    el.customSelect.classList.remove('open');
+
+    if (el.searchInput.value.trim()) {
+      performSearch();
+    }
+  };
+
+  options.forEach(option => {
+    const handleOptionSelect = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      selectPlatformOption(option);
+    };
+
+    option.addEventListener('pointerdown', handleOptionSelect);
+    option.addEventListener('click', handleOptionSelect);
   });
 
   // Close custom dropdown when clicking outside
