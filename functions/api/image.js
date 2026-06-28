@@ -1,6 +1,6 @@
 function getReferer(url) {
   const { hostname } = url;
-  if (hostname.includes('qqmusic') || hostname.includes('qq.com') || hostname.includes('qpic.cn')) return 'https://y.qq.com/';
+  if (hostname.includes('qqmusic') || hostname.includes('qq.com') || hostname.includes('qpic.cn') || hostname.includes('gtimg.cn')) return 'https://y.qq.com/';
   if (hostname.includes('126.net') || hostname.includes('163.com') || hostname.includes('127.net')) return 'https://music.163.com/';
   if (hostname.includes('kuwo.cn')) return 'http://www.kuwo.cn/';
   if (hostname.includes('migu.cn')) return 'https://music.migu.cn/';
@@ -43,7 +43,7 @@ export async function onRequestGet(context) {
   try {
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+      'Accept': 'image/jpeg,image/png,image/*;q=0.8,*/*;q=0.5',
     };
     const referer = getReferer(targetUrl);
     if (referer) headers.Referer = referer;

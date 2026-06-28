@@ -1,12 +1,15 @@
 function getReferer(targetUrl) {
   const { hostname } = targetUrl;
-  if (hostname.includes('qqmusic') || hostname.includes('qq.com') || hostname.includes('qpic.cn')) return 'https://y.qq.com/';
+  if (hostname.includes('qqmusic') || hostname.includes('qq.com') || hostname.includes('qpic.cn') || hostname.includes('gtimg.cn')) return 'https://y.qq.com/';
   if (hostname.includes('126.net') || hostname.includes('163.com') || hostname.includes('127.net')) return 'https://music.163.com/';
   if (hostname.includes('kuwo.cn')) return 'http://www.kuwo.cn/';
   if (hostname.includes('migu.cn')) return 'https://music.migu.cn/';
-  if (hostname.includes('kugou.com')) return 'https://www.kugou.com/';
+  if (hostname.includes('kugou.com') || hostname.includes('kgimg.com')) return 'https://www.kugou.com/';
   return '';
 }
+
+const COVER_FETCH_TIMEOUT_MS = 3000;
+const COVER_MAX_BYTES = 3 * 1024 * 1024;
 
 function concatUint8Arrays(arrays) {
   const total = arrays.reduce((sum, item) => sum + item.length, 0);
@@ -140,16 +143,101 @@ function createFlacPictureBlock(cover, isLast = true) {
   ]);
 }
 
-async function fetchCoverBytes(coverUrl) {
-  if (!coverUrl || !/^https?:\/\//i.test(coverUrl)) return null;
+function addUniqueCandidate(candidates, url) {
+  if (url && /^https?:\/\//i.test(url) && !candidates.includes(url)) {
+    candidates.push(url);
+  }
+}
+
+function prependUniqueCandidate(candidates, url) {
+  if (url && /^https?:\/\//i.test(url) && !candidates.includes(url)) {
+    candidates.unshift(url);
+  }
+}
+
+function getCoverCandidates(coverUrl) {
+  const candidates = [];
+  addUniqueCandidate(candidates, coverUrl);
+
+  try {
+    const url = new URL(coverUrl);
+    const hostname = url.hostname.toLowerCase();
+
+    if (hostname.includes('music.126.net') || hostname.includes('127.net')) {
+      const sizedUrl = new URL(url.toString());
+      if (!sizedUrl.searchParams.has('param')) {
+        sizedUrl.searchParams.set('param', '500y500');
+        addUniqueCandidate(candidates, sizedUrl.toString());
+      }
+    }
+
+    if (hostname === 'y.qq.com' && url.pathname.includes('/music/photo_new/')) {
+      const gtimgUrl = new URL(url.toString());
+      gtimgUrl.hostname = 'y.gtimg.cn';
+      addUniqueCandidate(candidates, gtimgUrl.toString());
+    }
+
+    if (coverUrl.includes('{size}')) {
+      addUniqueCandidate(candidates, coverUrl.replace('{size}', '500'));
+      addUniqueCandidate(candidates, coverUrl.replace('{size}', '480'));
+    }
+
+    if (url.pathname.toLowerCase().endsWith('.webp')) {
+      const jpgUrl = new URL(url.toString());
+      jpgUrl.pathname = jpgUrl.pathname.replace(/\.webp$/i, '.jpg');
+      prependUniqueCandidate(candidates, jpgUrl.toString());
+    }
+  } catch (_) {
+    // Ignore malformed candidates; the main URL validation handles invalid input.
+  }
+
+  return candidates;
+}
+
+function detectCoverMime(bytes, contentType) {
+  if (!bytes?.length) return '';
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return 'image/png';
+  }
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+
+  const mimeType = String(contentType || '').split(';')[0].toLowerCase();
+  if (['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(mimeType)) {
+    return mimeType === 'image/jpg' ? 'image/jpeg' : mimeType;
+  }
+  return '';
+}
+
+async function fetchCoverCandidate(coverUrl) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(new Error('cover timeout')), 3000);
+  const timeoutId = setTimeout(() => controller.abort(new Error('cover timeout')), COVER_FETCH_TIMEOUT_MS);
 
   try {
     const targetUrl = new URL(coverUrl);
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+      'Accept': 'image/jpeg,image/png,image/*;q=0.8,*/*;q=0.5',
     };
     const referer = getReferer(targetUrl);
     if (referer) headers.Referer = referer;
@@ -161,19 +249,41 @@ async function fetchCoverBytes(coverUrl) {
     });
     if (!res.ok) return null;
 
-    const mimeType = (res.headers.get('content-type') || 'image/jpeg').split(';')[0].toLowerCase();
-    if (!['image/jpeg', 'image/jpg', 'image/png'].includes(mimeType)) return null;
+    const contentLength = Number(res.headers.get('content-length') || 0);
+    if (contentLength > COVER_MAX_BYTES) return null;
+
     const bytes = new Uint8Array(await res.arrayBuffer());
-    if (!bytes.length) return null;
-    return {
-      bytes,
-      mimeType: mimeType === 'image/jpg' ? 'image/jpeg' : mimeType,
-    };
+    if (!bytes.length || bytes.length > COVER_MAX_BYTES) return null;
+
+    const mimeType = detectCoverMime(bytes, res.headers.get('content-type'));
+    if (!mimeType) return null;
+    return { bytes, mimeType };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function fetchCoverBytes(coverUrl) {
+  if (!coverUrl || !/^https?:\/\//i.test(coverUrl)) return null;
+
+  try {
+    let webpFallback = null;
+    for (const candidateUrl of getCoverCandidates(coverUrl)) {
+      let cover = null;
+      try {
+        cover = await fetchCoverCandidate(candidateUrl);
+      } catch (err) {
+        console.warn('[Download Proxy] cover candidate failed:', err?.message || err);
+        continue;
+      }
+      if (!cover) continue;
+      if (cover.mimeType === 'image/jpeg' || cover.mimeType === 'image/png') return cover;
+      if (!webpFallback) webpFallback = cover;
+    }
+    return webpFallback;
   } catch (err) {
     console.warn('[Download Proxy] cover fetch failed:', err?.message || err);
     return null;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 

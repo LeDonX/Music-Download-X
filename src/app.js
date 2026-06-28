@@ -269,6 +269,28 @@ function getImageProxyUrl(url) {
   return `/api/image?url=${encodeURIComponent(url)}`;
 }
 
+function buildPicParams(song) {
+  return new URLSearchParams({
+    source: song.source,
+    songmid: song.songmid || '',
+    albumId: song.albumId || '',
+    hash: song.hash || '',
+    name: song.name || '',
+    singer: song.singer || '',
+    img: song.img || '',
+  });
+}
+
+function applyCoverImage(imgEl, placeholderEl, url, { useProxy = true } = {}) {
+  if (!url || !/^https?:\/\//i.test(url)) return false;
+  imgEl.dataset.originalSrc = url;
+  imgEl.dataset.proxySrc = useProxy ? '1' : '0';
+  imgEl.src = useProxy ? getImageProxyUrl(url) : url;
+  imgEl.style.display = 'block';
+  placeholderEl.style.display = 'none';
+  return true;
+}
+
 async function resolveMusicUrl(sandboxInstance, song, quality) {
   const attempts = [
     { label: 'new', musicInfo: toNewMusicInfo(song) },
@@ -571,15 +593,7 @@ async function getBestCoverUrl(song) {
   }
 
   try {
-    const params = new URLSearchParams({
-      source: song.source,
-      songmid: song.songmid || '',
-      albumId: song.albumId || '',
-      hash: song.hash || '',
-      name: song.name || '',
-      singer: song.singer || '',
-      img: song.img || '',
-    });
+    const params = buildPicParams(song);
     const res = await fetch(`/api/pic?${params.toString()}`, { cache: 'force-cache' });
     if (!res.ok) return '';
     const data = await res.json();
@@ -1052,13 +1066,12 @@ function appendSearchResults(songs) {
     item.className = 'song-item';
     item.id = `song-item-${globalIdx}`;
 
-    const coverUrl = getImageProxyUrl(song.img);
-    const hasCover = Boolean(coverUrl);
+    const hasCover = Boolean(song.img && /^https?:\/\//i.test(song.img));
 
     item.innerHTML = `
       <div class="song-cover-wrapper">
         <div class="song-cover-placeholder" style="${hasCover ? 'display:none;' : ''}">♪</div>
-        <img class="song-cover" src="${coverUrl}" alt="Cover" style="${hasCover ? 'display:block;' : 'display:none;'}">
+        <img class="song-cover" alt="Cover" style="${hasCover ? 'display:block;' : 'display:none;'}">
       </div>
       <div class="song-info">
         <div class="song-title">${escapeHtml(song.name)}</div>
@@ -1091,12 +1104,20 @@ function appendSearchResults(songs) {
 
     const imgEl = item.querySelector('.song-cover');
     const placeholderEl = item.querySelector('.song-cover-placeholder');
+    imgEl.addEventListener('error', () => {
+      if (imgEl.dataset.proxySrc === '1' && imgEl.dataset.originalSrc) {
+        applyCoverImage(imgEl, placeholderEl, imgEl.dataset.originalSrc, { useProxy: false });
+        return;
+      }
+      imgEl.style.display = 'none';
+      placeholderEl.style.display = 'flex';
+      if (imgEl.dataset.coverLookupTried === '1') return;
+      imgEl.dataset.coverLookupTried = '1';
+      lazyLoadCover(song, imgEl, placeholderEl, globalIdx);
+    });
+
     if (hasCover) {
-      imgEl.addEventListener('error', () => {
-        imgEl.style.display = 'none';
-        placeholderEl.style.display = 'flex';
-        lazyLoadCover(song, imgEl, placeholderEl, globalIdx);
-      }, { once: true });
+      applyCoverImage(imgEl, placeholderEl, song.img);
     } else {
       lazyLoadCover(song, imgEl, placeholderEl, globalIdx);
     }
@@ -1105,23 +1126,14 @@ function appendSearchResults(songs) {
 
 async function lazyLoadCover(song, imgEl, placeholderEl, idx) {
   try {
-    const params = new URLSearchParams({
-      source: song.source,
-      songmid: song.songmid || '',
-      albumId: song.albumId || '',
-      hash: song.hash || '',
-      name: song.name || '',
-      singer: song.singer || '',
-      img: song.img || '',
-    });
+    const params = buildPicParams(song);
     const res = await fetch(`/api/pic?${params.toString()}`, { cache: 'force-cache' });
     if (!res.ok) return;
     const data = await res.json();
     if (data.img && /^https?:\/\//i.test(data.img)) {
-      imgEl.src = getImageProxyUrl(data.img);
-      imgEl.style.display = 'block';
-      placeholderEl.style.display = 'none';
+      applyCoverImage(imgEl, placeholderEl, data.img);
       state.currentResults[idx].img = data.img;
+      song.img = data.img;
     }
   } catch (err) {
     // Fail silently

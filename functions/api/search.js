@@ -55,6 +55,11 @@ function createSearchResponse(payload, headers) {
   });
 }
 
+function normalizePicUrl(url) {
+  if (!url || !/^https?:\/\//i.test(url)) return '';
+  return url.replace(/\.webp(?=($|[?#]))/i, '.jpg');
+}
+
 const UPSTREAM_SEARCH_TIMEOUT_MS = 3000;
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = UPSTREAM_SEARCH_TIMEOUT_MS) {
@@ -559,6 +564,7 @@ export async function onRequestGet(context) {
 
           let img = item.img3 || item.img2 || item.img1 || "";
           if (img && !/^https?:/i.test(img)) img = `http://d.musicapp.migu.cn${img}`;
+          img = normalizePicUrl(img);
 
           list.push({
             songmid,

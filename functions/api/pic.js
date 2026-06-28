@@ -4,6 +4,11 @@ const responseHeaders = {
   'Cache-Control': 'public, max-age=3600',
 };
 
+function normalizePicUrl(url) {
+  if (!url || !/^https?:\/\//i.test(url)) return '';
+  return url.replace(/\.webp(?=($|[?#]))/i, '.jpg');
+}
+
 async function getKugouPic(searchParams) {
   const songmid = searchParams.get('songmid') || '';
   const albumId = searchParams.get('albumId') || '';
@@ -48,7 +53,7 @@ async function getKugouPic(searchParams) {
   if (body.error_code !== 0) throw new Error(body.error_msg || 'Kugou pic failed');
   const info = body.data?.[0]?.info || {};
   const img = info.imgsize?.length ? info.image?.replace('{size}', info.imgsize[0]) : info.image;
-  return img || '';
+  return normalizePicUrl(img || '');
 }
 
 async function getKuwoPic(searchParams) {
@@ -61,7 +66,7 @@ async function getKuwoPic(searchParams) {
   });
   if (!res.ok) throw new Error(`Kuwo pic HTTP ${res.status}`);
   const body = await res.text();
-  return /^https?:\/\//i.test(body) ? body : '';
+  return normalizePicUrl(/^https?:\/\//i.test(body) ? body : '');
 }
 
 function getDirectPic(searchParams) {
@@ -70,13 +75,13 @@ function getDirectPic(searchParams) {
   const songmid = searchParams.get('songmid') || '';
   const img = searchParams.get('img') || '';
 
-  if (/^https?:\/\//i.test(img)) return img;
+  if (/^https?:\/\//i.test(img)) return normalizePicUrl(img);
 
   if (source === 'tx' && albumId) {
-    return `https://y.gtimg.cn/music/photo_new/T002R500x500M000${albumId}.jpg`;
+    return normalizePicUrl(`https://y.gtimg.cn/music/photo_new/T002R500x500M000${albumId}.jpg`);
   }
 
-  if (source === 'mg' && img) return `http://d.musicapp.migu.cn${img}`;
+  if (source === 'mg' && img) return normalizePicUrl(`http://d.musicapp.migu.cn${img}`);
 
   return '';
 }
