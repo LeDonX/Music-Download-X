@@ -511,6 +511,7 @@ async function handleDownload(url, filename, headers, meta = {}) {
 
     const responseHeaders = new Headers();
     const contentLength = res.headers.get('content-length');
+    let expectedLength = Number(contentLength || 0);
     const ext = getExt(filename, meta.ext, originalType);
     let body = res.body;
     let transformed = false;
@@ -521,6 +522,7 @@ async function handleDownload(url, filename, headers, meta = {}) {
       if (id3Tag) {
         body = streamMp3WithId3(body, id3Tag);
         transformed = true;
+        if (expectedLength > 0) expectedLength += id3Tag.length;
       }
     } else if (body && ext === 'flac') {
       const cover = await coverPromise;
@@ -528,12 +530,15 @@ async function handleDownload(url, filename, headers, meta = {}) {
       if (pictureBlock) {
         body = streamFlacWithPicture(body, pictureBlock);
         transformed = true;
+        if (expectedLength > 0) expectedLength += pictureBlock.length;
       }
     }
 
     if (contentLength && !transformed) {
       responseHeaders.set('Content-Length', contentLength);
-      responseHeaders.set('X-Content-Length', contentLength);
+    }
+    if (expectedLength > 0) {
+      responseHeaders.set('X-Content-Length', String(expectedLength));
     }
     responseHeaders.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename || 'music.mp3')}`);
     responseHeaders.set('Content-Type', originalType || 'application/octet-stream');

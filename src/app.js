@@ -227,6 +227,15 @@ function getExtensionFromMedia(contentType, fallbackExt, url = '') {
   return getExtensionFromUrl(url) || fallbackExt;
 }
 
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${Math.round(value)} B`;
+}
+
 function getActualQuality(selectedQuality, resolvedQuality, actualExt) {
   const selected = normalizeQualityType(selectedQuality) || selectedQuality;
   const resolved = normalizeQualityType(resolvedQuality);
@@ -585,6 +594,76 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
   }
 
   throw lastError || new Error('所有平台均解析失败');
+}
+
+async function downloadStreamToFile(downloadUrl, filename, {
+  statusText,
+  sizeText,
+  progressFill,
+  pctText,
+  onProgress,
+} = {}) {
+  const res = await fetch(downloadUrl, { cache: 'no-store' });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    throw new Error(detail || `下载请求失败 (${res.status})`);
+  }
+  if (!res.body) throw new Error('当前浏览器不支持流式下载');
+
+  const totalSize = Number(res.headers.get('X-Content-Length') || res.headers.get('Content-Length') || 0);
+  const chunks = [];
+  const reader = res.body.getReader();
+  let received = 0;
+  let lastPaintAt = 0;
+
+  if (statusText) statusText.innerText = '正在下载...';
+  if (sizeText) sizeText.innerText = totalSize ? `0 / ${formatBytes(totalSize)}` : '已下载 0 B';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+
+    const now = performance.now();
+    if (now - lastPaintAt < 120 && totalSize && received < totalSize) continue;
+    lastPaintAt = now;
+
+    const pct = totalSize ? Math.min(99, Math.floor((received / totalSize) * 100)) : 0;
+    if (totalSize) {
+      if (progressFill) progressFill.style.width = `${pct}%`;
+      if (pctText) pctText.innerText = `${pct}%`;
+      if (sizeText) sizeText.innerText = `${formatBytes(received)} / ${formatBytes(totalSize)}`;
+      onProgress?.(pct);
+    } else {
+      if (sizeText) sizeText.innerText = `已下载 ${formatBytes(received)}`;
+      if (pctText) pctText.innerText = '--';
+      onProgress?.(20);
+    }
+  }
+
+  const contentType = res.headers.get('content-type') || 'application/octet-stream';
+  const blob = new Blob(chunks, { type: contentType });
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+  }
+
+  if (progressFill) progressFill.style.width = '100%';
+  if (pctText) pctText.innerText = '100%';
+  if (sizeText) sizeText.innerText = totalSize
+    ? `${formatBytes(received)} / ${formatBytes(totalSize)}`
+    : formatBytes(received);
+  onProgress?.(100);
+
+  return { received, totalSize };
 }
 
 async function getBestCoverUrl(song) {
@@ -1230,19 +1309,16 @@ async function startDownloadTask(song, quality) {
       qualityWarnText = ` (实际下载为 ${formatQualityLabel(actualQuality)})`;
     }
 
-    statusText.innerText = '已交给浏览器下载' + qualityWarnText;
-    statusText.className = 'queue-status completed';
-    sizeText.innerText = '浏览器处理中';
-    
-    const a = document.createElement('a');
-    a.href = downloadUrl;
-    a.download = finalFilename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    await downloadStreamToFile(downloadUrl, finalFilename, {
+      statusText,
+      sizeText,
+      progressFill,
+      pctText,
+      onProgress: pct => updateDownloadProgressOnCard(song.songmid, song.source, pct),
+    });
 
-    progressFill.style.width = '100%';
-    pctText.innerText = '100%';
+    statusText.innerText = '下载完成' + qualityWarnText;
+    statusText.className = 'queue-status completed';
     updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
     
     if (isQualityChanged) {
