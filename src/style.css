@@ -30,6 +30,9 @@ a,
 input,
 textarea,
 select,
+label,
+svg,
+path,
 [role="button"],
 .custom-select,
 .custom-select-trigger,
@@ -37,12 +40,21 @@ select,
 .song-btn,
 .quality-btn,
 .search-btn,
+.clear-search-btn,
 .page-btn,
 .preset-btn,
 .save-script-btn,
 .modal-close-btn,
 .download-progress-wrapper {
   -webkit-tap-highlight-color: transparent;
+}
+
+button,
+input,
+textarea,
+select {
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 button,
@@ -53,6 +65,7 @@ button,
 .song-btn,
 .quality-btn,
 .search-btn,
+.clear-search-btn,
 .page-btn,
 .preset-btn,
 .save-script-btn,
@@ -61,6 +74,25 @@ button,
   user-select: none;
   -webkit-user-select: none;
   touch-action: manipulation;
+}
+
+button *,
+[role="button"] *,
+.custom-select *,
+.custom-option *,
+.song-btn *,
+.quality-btn *,
+.search-btn *,
+.clear-search-btn *,
+.page-btn *,
+.preset-btn *,
+.save-script-btn *,
+.modal-close-btn *,
+.download-progress-wrapper * {
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button:focus,
@@ -356,19 +388,59 @@ body {
   font-weight: 600;
 }
 
-.search-input {
+.search-input-wrapper {
   flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.search-input {
+  width: 100%;
   background: transparent;
   border: none;
   outline: none;
   color: var(--text-primary);
-  padding: 10px 18px;
+  padding: 10px 42px 10px 18px;
   font-size: 0.95rem;
   min-width: 0;
 }
 
 .search-input::placeholder {
   color: var(--text-muted);
+}
+
+.clear-search-btn {
+  position: absolute;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 50%;
+  background: #e2e8f0;
+  color: #64748b;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transform: scale(0.92);
+  transition: opacity 0.15s ease, transform 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.search-input-wrapper.has-value .clear-search-btn {
+  display: flex;
+  opacity: 1;
+  transform: scale(1);
+}
+
+@media (hover: hover) {
+  .clear-search-btn:hover {
+    background: #cbd5e1;
+    color: #334155;
+  }
 }
 
 .search-btn {
@@ -807,19 +879,56 @@ body {
 }
 
 @media (hover: none) {
+  button,
+  a,
+  input,
+  textarea,
+  select,
+  label,
+  svg,
+  path,
+  [role="button"],
+  .custom-select,
+  .custom-select-trigger,
+  .custom-option,
+  .search-btn,
+  .clear-search-btn,
+  .song-btn,
+  .quality-btn,
+  .page-btn,
+  .preset-btn,
+  .save-script-btn,
+  .modal-close-btn,
+  .download-progress-wrapper {
+    -webkit-tap-highlight-color: rgba(0, 0, 0, 0) !important;
+    -webkit-touch-callout: none;
+  }
+
   .custom-select-trigger:active,
+  .custom-select-trigger:focus,
   .custom-option:active,
+  .custom-option:focus,
   .search-btn:active,
+  .search-btn:focus,
+  .clear-search-btn:active,
+  .clear-search-btn:focus,
   .song-btn:active,
+  .song-btn:focus,
   .quality-btn:active,
+  .quality-btn:focus,
   .page-btn:active,
+  .page-btn:focus,
   .preset-btn:active,
+  .preset-btn:focus,
   .save-script-btn:active,
+  .save-script-btn:focus,
   .modal-close-btn:active,
+  .modal-close-btn:focus,
   .download-progress-wrapper:active {
     -webkit-tap-highlight-color: transparent;
     box-shadow: none;
     filter: none;
+    outline: none;
   }
 
   .custom-select-trigger:active {
@@ -840,6 +949,12 @@ body {
     background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
     color: white;
     transform: none;
+  }
+
+  .clear-search-btn:active {
+    background: #e2e8f0;
+    color: #64748b;
+    transform: scale(1);
   }
 
   .song-btn:active {
@@ -899,8 +1014,14 @@ body {
   }
 
   .search-input {
-    padding: 8px 10px;
+    padding: 8px 36px 8px 10px;
     font-size: 0.9rem;
+  }
+
+  .clear-search-btn {
+    right: 4px;
+    width: 24px;
+    height: 24px;
   }
 
   .search-btn {

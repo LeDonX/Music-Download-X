@@ -832,6 +832,7 @@ async function getOrLoadSandbox(url) {
 // DOM Elements
 const el = {
   searchInput: document.getElementById('searchInput'),
+  clearSearchBtn: document.getElementById('clearSearchBtn'),
   searchBtn: document.getElementById('searchBtn'),
   customSelect: document.getElementById('customSelect'),
   selectedPlatform: document.getElementById('selectedPlatform'),
@@ -876,8 +877,12 @@ async function init() {
 
 // Setup Event Listeners
 function setupEventListeners() {
+  document.addEventListener('pointerup', blurInteractiveTarget, true);
+  document.addEventListener('click', blurInteractiveTarget, true);
+
   // Search actions
   el.searchBtn.addEventListener('click', performSearch);
+  el.searchInput.addEventListener('input', updateClearSearchButton);
   el.searchInput.addEventListener('compositionstart', () => {
     state.isInputComposing = true;
   });
@@ -887,6 +892,11 @@ function setupEventListeners() {
   el.searchInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.isComposing && !state.isInputComposing) performSearch();
   });
+  el.clearSearchBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+  });
+  el.clearSearchBtn.addEventListener('click', clearSearchInput);
+  updateClearSearchButton();
 
   // Toggle custom dropdown menu
   el.customSelect.addEventListener('click', (e) => {
@@ -981,6 +991,54 @@ function setupEventListeners() {
       el.qualityModal.classList.remove('active');
       songToDownload = null;
     });
+  });
+}
+
+function updateClearSearchButton() {
+  el.searchInput.parentElement?.classList.toggle('has-value', Boolean(el.searchInput.value));
+}
+
+function renderInitialEmptyState() {
+  el.songList.innerHTML = `
+    <div class="empty-state">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+      </svg>
+      <p>探索你喜爱的海量高品质音乐</p>
+      <p style="font-size: 0.8rem; opacity: 0.8;">输入关键词并选择平台以开始搜索</p>
+    </div>
+  `;
+  el.resultsCount.innerText = '共 0 首歌曲';
+}
+
+function clearSearchInput() {
+  if (state.searchAbortController) {
+    state.searchAbortController.abort();
+    state.searchAbortController = null;
+  }
+  state.searchRequestId += 1;
+  state.currentKeyword = '';
+  state.currentResults = [];
+  state.currentPage = 1;
+  state.totalCount = 0;
+  state.isLoading = false;
+  el.searchInput.value = '';
+  updateClearSearchButton();
+  renderInitialEmptyState();
+  requestAnimationFrame(() => {
+    el.searchInput.focus({ preventScroll: true });
+  });
+}
+
+function blurInteractiveTarget(e) {
+  if (e.target?.closest?.('#clearSearchBtn')) return;
+  const target = e.target?.closest?.('button, .custom-select-trigger, .custom-option, .song-btn, .quality-btn, .download-progress-wrapper, .modal-close-btn');
+  if (!target) return;
+  requestAnimationFrame(() => {
+    target.blur?.();
+    if (document.activeElement instanceof HTMLElement && target.contains(document.activeElement)) {
+      document.activeElement.blur();
+    }
   });
 }
 
