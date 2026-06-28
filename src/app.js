@@ -184,6 +184,19 @@ function formatQualityLabel(type) {
   return String(type || '').toUpperCase();
 }
 
+function sanitizeFilenamePart(value) {
+  return String(value || '')
+    .replace(/[\\/:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildSongFilename(song, ext) {
+  const singer = sanitizeFilenamePart(song.singer) || '未知歌手';
+  const name = sanitizeFilenamePart(song.name) || '未知歌曲';
+  return `${singer} - ${name}.${ext}`;
+}
+
 function getDefaultExtensionForQuality(quality) {
   const value = normalizeQualityType(quality);
   return value.startsWith('flac') ? 'flac' : 'mp3';
@@ -1261,7 +1274,7 @@ function openDownloadModal(song) {
 async function startDownloadTask(song, quality) {
   const selectedQuality = normalizeQualityType(quality) || quality;
   const defaultExt = getDefaultExtensionForQuality(selectedQuality);
-  const displayFilename = `${song.singer} - ${song.name} [${formatQualityLabel(selectedQuality)}].${defaultExt}`;
+  const displayFilename = buildSongFilename(song, defaultExt);
   const taskId = Date.now().toString();
 
   // Create UI list item
@@ -1315,7 +1328,7 @@ async function startDownloadTask(song, quality) {
     const isQualityChanged = Boolean(actualQuality) && actualQuality !== selectedQuality;
 
     // Build the finalized file name
-    const finalFilename = `${song.singer} - ${song.name} [${formatQualityLabel(actualQuality || selectedQuality)}].${actualExt}`;
+    const finalFilename = buildSongFilename(resolvedSong, actualExt);
     const nameEl = taskEl.querySelector('.queue-name');
     if (nameEl) {
       nameEl.innerText = finalFilename;
