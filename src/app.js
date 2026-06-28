@@ -21,6 +21,8 @@ const PLATFORM_NAMES = {
 const SEARCH_TIMEOUT_MS = 18000;
 const SEARCH_EMPTY_RETRY_LIMIT = 3;
 const SEARCH_RETRY_DELAYS = [250, 700, 1400];
+const COVER_FETCH_TIMEOUT_MS = 3500;
+const COVER_EMBED_WAIT_MS = 1200;
 const ORDERED_QUALITIES = new Set(['128k', '320k', 'flac', 'flac24bit']);
 
 // Application State
@@ -684,8 +686,13 @@ function stripExistingId3(bytes) {
 async function fetchCoverBytes(song) {
   const coverUrl = await getBestCoverUrl(song);
   if (!coverUrl) return null;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error('cover timeout')), COVER_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(getImageProxyUrl(coverUrl), { cache: 'force-cache' });
+    const res = await fetch(getImageProxyUrl(coverUrl), {
+      cache: 'force-cache',
+      signal: controller.signal,
+    });
     if (!res.ok) return null;
     const contentType = res.headers.get('Content-Type') || 'image/jpeg';
     if (!/^image\//i.test(contentType)) return null;
@@ -701,17 +708,30 @@ async function fetchCoverBytes(song) {
   } catch (err) {
     console.warn('[Download] cover fetch failed:', err.message);
     return null;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
-async function embedMp3Metadata(audioBytes, song) {
+function waitForPromise(promise, timeoutMs) {
+  let timeoutId;
+  const timeout = new Promise(resolve => {
+    timeoutId = setTimeout(() => resolve(null), timeoutMs);
+  });
+  return Promise.race([
+    promise.catch(() => null),
+    timeout,
+  ]).finally(() => clearTimeout(timeoutId));
+}
+
+async function embedMp3Metadata(audioBytes, song, coverPromise = null) {
   const frames = [
     createTextFrame('TIT2', song.name),
     createTextFrame('TPE1', String(song.singer || '').replace(/、/g, ';')),
     createTextFrame('TALB', song.albumName),
   ].filter(Boolean);
 
-  const cover = await fetchCoverBytes(song);
+  const cover = coverPromise ? await waitForPromise(coverPromise, COVER_EMBED_WAIT_MS) : await fetchCoverBytes(song);
   const apic = cover ? createApicFrame(cover.bytes, cover.mimeType) : null;
   if (apic) frames.push(apic);
   if (!frames.length) return audioBytes;
@@ -750,7 +770,7 @@ function createFlacPictureBlock(cover, isLast = true) {
   ]);
 }
 
-async function embedFlacCover(audioBytes, song) {
+async function embedFlacCover(audioBytes, song, coverPromise = null) {
   if (
     audioBytes.length < 8 ||
     audioBytes[0] !== 0x66 ||
@@ -761,7 +781,7 @@ async function embedFlacCover(audioBytes, song) {
     return audioBytes;
   }
 
-  const cover = await fetchCoverBytes(song);
+  const cover = coverPromise ? await waitForPromise(coverPromise, COVER_EMBED_WAIT_MS) : await fetchCoverBytes(song);
   const pictureBlock = createFlacPictureBlock(cover, true);
   if (!pictureBlock) return audioBytes;
 
@@ -783,9 +803,9 @@ async function embedFlacCover(audioBytes, song) {
   ]);
 }
 
-async function embedAudioMetadata(audioBytes, song, ext) {
-  if (ext === 'mp3') return embedMp3Metadata(audioBytes, song);
-  if (ext === 'flac') return embedFlacCover(audioBytes, song);
+async function embedAudioMetadata(audioBytes, song, ext, coverPromise = null) {
+  if (ext === 'mp3') return embedMp3Metadata(audioBytes, song, coverPromise);
+  if (ext === 'flac') return embedFlacCover(audioBytes, song, coverPromise);
   return audioBytes;
 }
 
@@ -1446,6 +1466,9 @@ async function startDownloadTask(song, quality) {
       nameEl.title = finalFilename;
     }
 
+    const shouldEmbedCover = ['mp3', 'flac'].includes(actualExt);
+    const coverPromise = shouldEmbedCover ? fetchCoverBytes(resolvedSong) : null;
+
     if (contentLength) {
       sizeText.innerText = formatBytes(contentLength);
     } else {
@@ -1486,11 +1509,11 @@ async function startDownloadTask(song, quality) {
       qualityWarnText = ` (实际下载为 ${formatQualityLabel(actualQuality)})`;
     }
 
-    statusText.innerText = ['mp3', 'flac'].includes(actualExt) ? '正在写入封面与歌曲信息...' : '正在写入本地磁盘...';
+    statusText.innerText = shouldEmbedCover ? '正在写入封面与歌曲信息...' : '正在写入本地磁盘...';
     statusText.className = 'queue-status completed';
 
     let fileBytes = concatUint8Arrays(chunks);
-    fileBytes = await embedAudioMetadata(fileBytes, resolvedSong, actualExt);
+    fileBytes = await embedAudioMetadata(fileBytes, resolvedSong, actualExt, coverPromise);
 
     const blob = new Blob([fileBytes], { type: contentType || 'application/octet-stream' });
     const blobUrl = URL.createObjectURL(blob);
