@@ -170,12 +170,16 @@ body {
 /* Toast Notification Container */
 .toast-container {
   position: fixed;
-  top: 20px;
-  right: 20px;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  width: min(90%, 600px);
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 10px;
   z-index: 3000;
+  pointer-events: none;
 }
 
 .toast {
@@ -183,8 +187,11 @@ body {
   border-radius: 12px;
   font-size: 0.85rem;
   font-weight: 500;
+  max-width: 100%;
+  text-align: center;
   box-shadow: 0 8px 16px rgba(0,0,0,0.06);
-  animation: slideIn 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+  animation: toastIn 0.25s ease;
+  pointer-events: auto;
 }
 
 .toast.success {
@@ -211,9 +218,9 @@ body {
   color: #92400e;
 }
 
-@keyframes slideIn {
-  0% { transform: translateX(100%) translateY(-20px); opacity: 0; }
-  100% { transform: translateX(0) translateY(0); opacity: 1; }
+@keyframes toastIn {
+  0% { transform: translateY(8px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
 }
 
 /* App Container Layout (Centered single pane) */
@@ -282,6 +289,7 @@ body {
   display: flex;
   align-items: center;
   width: 100%;
+  gap: 8px;
 }
 
 .custom-select {
@@ -394,6 +402,7 @@ body {
   display: flex;
   align-items: center;
   min-width: 0;
+  overflow: hidden;
 }
 
 .search-input {
@@ -458,6 +467,7 @@ body {
   flex-shrink: 0;
   white-space: nowrap;
   letter-spacing: 0.5px;
+  min-width: 72px;
 }
 
 @media (hover: hover) {
@@ -982,6 +992,16 @@ body {
 
 /* Responsive Adaptation (Especially Mobile Ports) */
 @media (max-width: 768px) {
+  .toast-container {
+    bottom: 86px;
+    width: 92%;
+  }
+
+  .toast {
+    padding: 10px 14px;
+    font-size: 0.8rem;
+  }
+
   .app-container {
     padding: 16px 12px;
     gap: 15px;
@@ -1015,7 +1035,7 @@ body {
 
   .search-input {
     padding: 8px 36px 8px 10px;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
   }
 
   .clear-search-btn {
@@ -1025,9 +1045,19 @@ body {
   }
 
   .search-btn {
-    padding: 8px 20px;
+    padding: 8px 14px;
     font-size: 0.85rem;
     border-radius: 25px;
+    min-width: 56px;
+    letter-spacing: 0;
+  }
+
+  .search-bar-inner {
+    gap: 6px;
+  }
+
+  .custom-select-trigger {
+    gap: 6px;
   }
 
   .results-card {

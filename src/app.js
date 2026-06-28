@@ -1507,7 +1507,7 @@ function showToast(message, type = 'info') {
   
   setTimeout(() => {
     toast.style.opacity = '0';
-    toast.style.transform = 'translateY(-10px)';
+    toast.style.transform = 'translateY(8px)';
     toast.style.transition = 'all 0.3s ease';
     setTimeout(() => {
       el.toastContainer.removeChild(toast);
