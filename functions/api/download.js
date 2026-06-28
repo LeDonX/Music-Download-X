@@ -8,8 +8,9 @@ function getReferer(targetUrl) {
   return '';
 }
 
-const COVER_FETCH_TIMEOUT_MS = 3000;
+const COVER_FETCH_TIMEOUT_MS = 8000;
 const COVER_MAX_BYTES = 3 * 1024 * 1024;
+const FLAC_VENDOR = 'Music Download X';
 
 function concatUint8Arrays(arrays) {
   const total = arrays.reduce((sum, item) => sum + item.length, 0);
@@ -70,6 +71,19 @@ function stringToLatin1Bytes(text) {
   return bytes;
 }
 
+function stringToUtf8Bytes(text) {
+  return new TextEncoder().encode(String(text || ''));
+}
+
+function uint32le(size) {
+  return [
+    size & 0xff,
+    (size >> 8) & 0xff,
+    (size >> 16) & 0xff,
+    (size >> 24) & 0xff,
+  ];
+}
+
 function createTextFrame(id, text) {
   const value = String(text || '').trim();
   if (!value) return null;
@@ -87,6 +101,7 @@ function createTextFrame(id, text) {
 
 function createApicFrame(cover) {
   if (!cover?.bytes?.length || !cover.mimeType) return null;
+  if (!['image/jpeg', 'image/png'].includes(cover.mimeType)) return null;
   const mime = new TextEncoder().encode(cover.mimeType);
   const content = concatUint8Arrays([
     new Uint8Array([0x00]),
@@ -123,6 +138,7 @@ function createId3Tag(meta, cover) {
 
 function createFlacPictureBlock(cover, isLast = true) {
   if (!cover?.bytes?.length || !cover.mimeType) return null;
+  if (!['image/jpeg', 'image/png'].includes(cover.mimeType)) return null;
   const mimeBytes = stringToLatin1Bytes(cover.mimeType);
   const body = concatUint8Arrays([
     new Uint8Array(uint32be(3)),
@@ -139,6 +155,36 @@ function createFlacPictureBlock(cover, isLast = true) {
 
   return concatUint8Arrays([
     new Uint8Array([(isLast ? 0x80 : 0x00) | 0x06, ...uint24be(body.length)]),
+    body,
+  ]);
+}
+
+function createFlacVorbisCommentBlock(meta, isLast = false) {
+  const comments = [
+    ['TITLE', meta.title],
+    ['ARTIST', meta.artist],
+    ['ALBUM', meta.album],
+  ]
+    .map(([key, value]) => `${key}=${String(value || '').trim()}`)
+    .filter((comment) => !comment.endsWith('='));
+
+  if (!comments.length) return null;
+
+  const vendorBytes = stringToUtf8Bytes(FLAC_VENDOR);
+  const commentParts = comments.flatMap((comment) => {
+    const bytes = stringToUtf8Bytes(comment);
+    return [new Uint8Array(uint32le(bytes.length)), bytes];
+  });
+
+  const body = concatUint8Arrays([
+    new Uint8Array(uint32le(vendorBytes.length)),
+    vendorBytes,
+    new Uint8Array(uint32le(comments.length)),
+    ...commentParts,
+  ]);
+
+  return concatUint8Arrays([
+    new Uint8Array([(isLast ? 0x80 : 0x00) | 0x04, ...uint24be(body.length)]),
     body,
   ]);
 }
@@ -229,12 +275,12 @@ function detectCoverMime(bytes, contentType) {
   return '';
 }
 
-async function fetchCoverCandidate(coverUrl) {
+async function fetchCoverCandidate(coverUrl, baseUrl = '') {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(new Error('cover timeout')), COVER_FETCH_TIMEOUT_MS);
 
   try {
-    const targetUrl = new URL(coverUrl);
+    const targetUrl = baseUrl ? new URL(coverUrl, baseUrl) : new URL(coverUrl);
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'image/jpeg,image/png,image/*;q=0.8,*/*;q=0.5',
@@ -263,24 +309,30 @@ async function fetchCoverCandidate(coverUrl) {
   }
 }
 
-async function fetchCoverBytes(coverUrl) {
+async function fetchCoverBytes(coverUrl, baseUrl = '') {
   if (!coverUrl || !/^https?:\/\//i.test(coverUrl)) return null;
 
   try {
-    let webpFallback = null;
-    for (const candidateUrl of getCoverCandidates(coverUrl)) {
+    const candidates = getCoverCandidates(coverUrl);
+    for (const candidateUrl of candidates) {
       let cover = null;
       try {
-        cover = await fetchCoverCandidate(candidateUrl);
+        cover = await fetchCoverCandidate(candidateUrl, baseUrl);
       } catch (err) {
         console.warn('[Download Proxy] cover candidate failed:', err?.message || err);
         continue;
       }
       if (!cover) continue;
       if (cover.mimeType === 'image/jpeg' || cover.mimeType === 'image/png') return cover;
-      if (!webpFallback) webpFallback = cover;
     }
-    return webpFallback;
+
+    if (baseUrl) {
+      const proxiedCover = await fetchCoverCandidate(`/api/image?url=${encodeURIComponent(coverUrl)}`, baseUrl);
+      if (proxiedCover?.mimeType === 'image/jpeg' || proxiedCover?.mimeType === 'image/png') {
+        return proxiedCover;
+      }
+    }
+    return null;
   } catch (err) {
     console.warn('[Download Proxy] cover fetch failed:', err?.message || err);
     return null;
@@ -368,8 +420,9 @@ async function prepareMp3StreamWithId3(sourceStream, id3Tag) {
   };
 }
 
-function streamFlacWithPicture(sourceStream, pictureBlock) {
+function streamFlacWithMetadata(sourceStream, metadataBlocks) {
   const reader = sourceStream.getReader();
+  const blocks = metadataBlocks.filter(Boolean);
   return new ReadableStream({
     async start(controller) {
       const chunks = [];
@@ -426,7 +479,11 @@ function streamFlacWithPicture(sourceStream, pictureBlock) {
         if (lastHeaderOffset >= 0 && offset <= buffered.length) {
           buffered[lastHeaderOffset] &= 0x7f;
           enqueueBytes(controller, buffered.slice(0, offset));
-          enqueueBytes(controller, pictureBlock);
+          for (let i = 0; i < blocks.length; i++) {
+            const block = blocks[i];
+            if (i === blocks.length - 1) block[0] |= 0x80;
+            enqueueBytes(controller, block);
+          }
           enqueueBytes(controller, buffered.slice(offset));
         } else {
           enqueueBytes(controller, buffered);
@@ -482,7 +539,7 @@ function getExt(filename, metaExt, contentType) {
   return '';
 }
 
-async function handleDownload(url, filename, headers, meta = {}) {
+async function handleDownload(url, filename, headers, meta = {}, requestUrl = '') {
   if (!url) {
     return new Response('Missing URL parameter', {
       status: 400,
@@ -508,7 +565,7 @@ async function handleDownload(url, filename, headers, meta = {}) {
   }
 
   try {
-    const coverPromise = fetchCoverBytes(meta.cover || '');
+    const coverPromise = fetchCoverBytes(meta.cover || '', requestUrl);
     const res = await fetch(targetUrl.toString(), {
       headers: getDownloadHeaders(targetUrl.toString(), headers),
       redirect: 'follow',
@@ -536,6 +593,7 @@ async function handleDownload(url, filename, headers, meta = {}) {
     const ext = getExt(filename, meta.ext, originalType);
     let body = res.body;
     let transformed = false;
+    let coverEmbedded = false;
 
     if (body && ext === 'mp3') {
       const cover = await coverPromise;
@@ -544,15 +602,19 @@ async function handleDownload(url, filename, headers, meta = {}) {
         const prepared = await prepareMp3StreamWithId3(body, id3Tag);
         body = prepared.body;
         transformed = true;
+        coverEmbedded = Boolean(cover);
         if (expectedLength > 0) expectedLength += id3Tag.length - prepared.removedBytes;
       }
     } else if (body && ext === 'flac') {
       const cover = await coverPromise;
-      const pictureBlock = createFlacPictureBlock(cover, true);
-      if (pictureBlock) {
-        body = streamFlacWithPicture(body, pictureBlock);
+      const vorbisBlock = createFlacVorbisCommentBlock(meta);
+      const pictureBlock = cover ? createFlacPictureBlock(cover, true) : null;
+      const flacBlocks = [vorbisBlock, pictureBlock].filter(Boolean);
+      if (flacBlocks.length) {
+        body = streamFlacWithMetadata(body, flacBlocks);
         transformed = true;
-        if (expectedLength > 0) expectedLength += pictureBlock.length;
+        coverEmbedded = Boolean(pictureBlock);
+        if (expectedLength > 0) expectedLength += flacBlocks.reduce((sum, block) => sum + block.length, 0);
       }
     }
 
@@ -564,7 +626,8 @@ async function handleDownload(url, filename, headers, meta = {}) {
     responseHeaders.set('Content-Type', originalType || 'application/octet-stream');
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('Access-Control-Allow-Headers', '*');
-    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, X-Content-Length');
+    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, X-Content-Length, X-Cover-Embedded');
+    responseHeaders.set('X-Cover-Embedded', coverEmbedded ? '1' : '0');
 
     const fixedLengthBody = createFixedLengthBody(body, expectedLength);
 
@@ -600,13 +663,13 @@ export async function onRequestGet(context) {
     album: searchParams.get('album') || '',
     cover: searchParams.get('cover') || '',
     ext: searchParams.get('ext') || '',
-  });
+  }, context.request.url);
 }
 
 export async function onRequestPost(context) {
   try {
     const { url, filename, headers, meta } = await context.request.json();
-    return handleDownload(url, filename, headers || {}, meta || {});
+    return handleDownload(url, filename, headers || {}, meta || {}, context.request.url);
   } catch (err) {
     return new Response(err.message, {
       status: 400,

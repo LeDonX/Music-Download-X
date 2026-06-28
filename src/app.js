@@ -590,7 +590,7 @@ async function resolveWithScripts(song, quality, statusText, validateResolution)
           successfulUrl: url,
           resolvedSong: song,
         };
-        if (validateResolution) return await validateResolution(resolution);
+        if (validateResolution) return await validateResolution(resolution, song);
         return resolution;
       }
     } catch (err) {
@@ -610,14 +610,15 @@ async function buildDownloadUrlFromResolution(resolution, quality, filename, son
   const mediaInfo = getDownloadMediaInfo('', quality, resolution.resolvedQuality, resolution.audioUrl);
   const finalExt = mediaInfo.actualExt || getDefaultExtensionForQuality(mediaInfo.actualQuality || quality);
   const finalFilename = buildSongFilename(song, finalExt);
-  const coverUrl = await getBestCoverUrl(song);
+  const metadataSong = resolution.resolvedSong || song;
+  const coverUrl = await getBestCoverUrl(metadataSong);
   const params = new URLSearchParams({
     url: resolution.audioUrl,
     filename: finalFilename,
     headers: JSON.stringify(resolution.audioHeaders || {}),
-    title: song.name || '',
-    artist: song.singer || '',
-    album: song.albumName || '',
+    title: metadataSong.name || song.name || '',
+    artist: metadataSong.singer || song.singer || '',
+    album: metadataSong.albumName || song.albumName || '',
     cover: coverUrl || '',
     ext: finalExt,
   });
