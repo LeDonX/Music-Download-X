@@ -2,6 +2,48 @@ import CryptoJS from 'https://esm.sh/crypto-js@4.2.0';
 import forge from 'https://esm.sh/node-forge@1.3.1';
 import pako from 'https://esm.sh/pako@2.1.0';
 
+function toUint8Array(data) {
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  return new Uint8Array(data);
+}
+
+function createBufferLike(data) {
+  const uint8 = toUint8Array(data);
+  uint8.toString = function(encoding = 'utf8') {
+    if (encoding === 'hex') {
+      return Array.from(this).map(b => b.toString(16).padStart(2, '0')).join('');
+    } else if (encoding === 'base64') {
+      let binary = '';
+      for (let i = 0; i < this.length; i++) {
+        binary += String.fromCharCode(this[i]);
+      }
+      return btoa(binary);
+    } else if (encoding === 'binary') {
+      let binary = '';
+      for (let i = 0; i < this.length; i++) {
+        binary += String.fromCharCode(this[i]);
+      }
+      return binary;
+    }
+    return new TextDecoder().decode(this);
+  };
+  uint8.toJSON = function() {
+    return {
+      type: 'Buffer',
+      data: Array.from(this),
+    };
+  };
+  return uint8;
+}
+
+function isBinaryLike(data) {
+  return data instanceof ArrayBuffer || ArrayBuffer.isView(data) || Array.isArray(data);
+}
+
 // Buffer Utility Polyfill
 const bufferUtils = {
   from(data, encoding) {
@@ -11,43 +53,26 @@ const bufferUtils = {
         for (let i = 0; i < data.length; i += 2) {
           arr.push(parseInt(data.substr(i, 2), 16));
         }
-        return new Uint8Array(arr);
+        return createBufferLike(arr);
       } else if (encoding === 'base64') {
         const binaryStr = atob(data);
         const bytes = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) {
           bytes[i] = binaryStr.charCodeAt(i);
         }
-        return bytes;
+        return createBufferLike(bytes);
       } else {
-        return new TextEncoder().encode(data);
+        return createBufferLike(new TextEncoder().encode(data));
       }
-    } else if (Array.isArray(data) || data instanceof Uint8Array || data instanceof ArrayBuffer) {
-      return new Uint8Array(data);
+    } else if (data && data.type === 'Buffer' && Array.isArray(data.data)) {
+      return createBufferLike(data.data);
+    } else if (isBinaryLike(data)) {
+      return createBufferLike(data);
     }
-    return new Uint8Array();
+    return createBufferLike([]);
   },
   bufToString(buf, format) {
-    const uint8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-    if (format === 'hex') {
-      return Array.from(uint8).map(b => b.toString(16).padStart(2, '0')).join('');
-    } else if (format === 'base64') {
-      let binary = '';
-      const len = uint8.byteLength;
-      for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(uint8[i]);
-      }
-      return btoa(binary);
-    } else if (format === 'binary') {
-      let binary = '';
-      const len = uint8.byteLength;
-      for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(uint8[i]);
-      }
-      return binary;
-    } else {
-      return new TextDecoder().decode(uint8);
-    }
+    return createBufferLike(buf).toString(format);
   }
 };
 
@@ -65,10 +90,15 @@ function wordArrayToUint8(wa) {
   for (let i = 0; i < wa.sigBytes; i++) {
     u8[i] = (wa.words[i >>> 2] >>> (24 - (i % 4) * 8)) & 0xff;
   }
-  return u8;
+  return createBufferLike(u8);
 }
 
-export function initLxSandbox(scriptContent, scriptMeta = {}) {
+function hasHeader(headers, name) {
+  const lowerName = name.toLowerCase();
+  return Object.keys(headers || {}).some(key => key.toLowerCase() === lowerName);
+}
+
+export function initResolverSandbox(scriptContent, scriptMeta = {}) {
   return new Promise((resolveInit, rejectInit) => {
     let requestHandler = null;
     let initedCallback = null;
@@ -104,59 +134,56 @@ export function initLxSandbox(scriptContent, scriptMeta = {}) {
         }
         return Promise.resolve();
       },
-      request(url, options, callback) {
+      request(url, options = {}, callback) {
         console.log(`[Sandbox Request] URL: ${url}`, options);
         
+        const requestHeaders = { ...(options.headers || {}) };
         let bodyToSend = options.body;
         let isBodyBase64 = false;
         
-        if (options.body && (options.body instanceof Uint8Array || typeof options.body === 'object')) {
-          // Check if it is a Buffer-like object or has bytes
-          const isBuffer = options.body.constructor?.name === 'Buffer' || Array.isArray(options.body) || options.body.buffer;
-          if (isBuffer) {
-            const bytes = new Uint8Array(options.body);
+        if (options.body != null) {
+          if (isBinaryLike(options.body) || options.body?.type === 'Buffer') {
+            const bytes = bufferUtils.from(options.body);
             let binary = '';
             for (let i = 0; i < bytes.length; i++) {
               binary += String.fromCharCode(bytes[i]);
             }
             bodyToSend = btoa(binary);
             isBodyBase64 = true;
+          } else if (typeof options.body === 'object') {
+            bodyToSend = JSON.stringify(options.body);
+            if (!hasHeader(requestHeaders, 'content-type')) {
+              requestHeaders['Content-Type'] = 'application/json';
+            }
           }
         }
+
+        const controller = new AbortController();
+        const timeoutMs = typeof options.timeout === 'number' && options.timeout > 0
+          ? Math.min(options.timeout, 60000)
+          : 60000;
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
         // Call our serverless proxy
         fetch('/api/proxy', {
           method: 'POST',
+          signal: controller.signal,
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
             url,
             method: options.method || 'GET',
-            headers: options.headers || {},
+            headers: requestHeaders,
             body: bodyToSend,
             isBodyBase64,
-            form: options.form
+            form: options.form,
+            formData: options.formData
           })
         })
         .then(async res => {
           const arrayBuffer = await res.arrayBuffer();
-          const uint8 = new Uint8Array(arrayBuffer);
-          
-          // Attach a Buffer-like toString method to raw Uint8Array
-          uint8.toString = function(encoding) {
-            if (encoding === 'hex') {
-              return Array.from(this).map(b => b.toString(16).padStart(2, '0')).join('');
-            } else if (encoding === 'base64') {
-              let binary = '';
-              for (let i = 0; i < this.length; i++) {
-                binary += String.fromCharCode(this[i]);
-              }
-              return btoa(binary);
-            } else {
-              return new TextDecoder().decode(this);
-            }
-          };
+          const uint8 = createBufferLike(arrayBuffer);
 
           let parsedBody;
           const rawString = new TextDecoder().decode(uint8);
@@ -185,10 +212,14 @@ export function initLxSandbox(scriptContent, scriptMeta = {}) {
         .catch(err => {
           console.error('[Sandbox Request Error]', err);
           callback(err, null, null);
+        })
+        .finally(() => {
+          clearTimeout(timeoutId);
         });
 
         // Return cancel/abort callback
         return () => {
+          controller.abort();
           console.log('[Sandbox Request] Cancelled');
         };
       },
@@ -247,7 +278,7 @@ export function initLxSandbox(scriptContent, scriptMeta = {}) {
           randomBytes(size) {
             const arr = new Uint8Array(size);
             window.crypto.getRandomValues(arr);
-            return arr;
+            return createBufferLike(arr);
           },
           md5(str) {
             return CryptoJS.MD5(str).toString();
@@ -256,10 +287,10 @@ export function initLxSandbox(scriptContent, scriptMeta = {}) {
         buffer: bufferUtils,
         zlib: {
           inflate(buf) {
-            return Promise.resolve(pako.inflate(buf));
+            return Promise.resolve(createBufferLike(pako.inflate(buf)));
           },
           deflate(data) {
-            return Promise.resolve(pako.deflate(data));
+            return Promise.resolve(createBufferLike(pako.deflate(data)));
           },
         },
       }

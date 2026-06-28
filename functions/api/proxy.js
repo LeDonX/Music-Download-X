@@ -1,7 +1,7 @@
 export async function onRequestPost(context) {
   try {
     const requestData = await context.request.json();
-    const { url, method = 'GET', headers = {}, body, isBodyBase64, form } = requestData;
+    const { url, method = 'GET', headers = {}, body, isBodyBase64, form, formData } = requestData;
 
     if (!url) {
       return new Response(JSON.stringify({ error: 'Missing target URL' }), {
@@ -35,6 +35,12 @@ export async function onRequestPost(context) {
     } else if (form) {
       fetchBody = new URLSearchParams(form).toString();
       forwardHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
+    } else if (formData) {
+      const fd = new FormData();
+      for (const [key, value] of Object.entries(formData)) {
+        fd.append(key, value);
+      }
+      fetchBody = fd;
     }
 
     const fetchOptions = {

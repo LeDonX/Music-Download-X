@@ -1,4 +1,4 @@
-import { initLxSandbox } from './lx-sandbox.js';
+import { initResolverSandbox } from './resolver-sandbox.js';
 
 const SOURCE_URLS = [
   'https://fastly.jsdelivr.net/gh/pdone/lx-music-source@main/lx/latest.js'
@@ -17,7 +17,118 @@ const state = {
   limit: 15,
   currentKeyword: '',
   isLoading: false,
+  searchRequestId: 0,
+  searchAbortController: null,
 };
+
+function buildQualityMap(song) {
+  const qualityMap = { ...(song._types || {}) };
+  for (const typeInfo of song.types || []) {
+    qualityMap[typeInfo.type] = {
+      ...(qualityMap[typeInfo.type] || {}),
+      ...typeInfo,
+    };
+  }
+  return qualityMap;
+}
+
+function toNewMusicInfo(song) {
+  const meta = {
+    songId: song.songmid,
+    albumName: song.albumName || '',
+    picUrl: song.img || '',
+    qualitys: song.types || [],
+    _qualitys: buildQualityMap(song),
+    albumId: song.albumId || '',
+  };
+
+  switch (song.source) {
+    case 'kg':
+      meta.hash = song.hash || meta._qualitys?.['128k']?.hash || '';
+      break;
+    case 'tx':
+      meta.strMediaMid = song.strMediaMid || '';
+      meta.id = song.songId || '';
+      meta.albumMid = song.albumMid || '';
+      break;
+    case 'mg':
+      meta.copyrightId = song.copyrightId || '';
+      meta.lrcUrl = song.lrcUrl || '';
+      meta.mrcUrl = song.mrcUrl || '';
+      meta.trcUrl = song.trcUrl || '';
+      break;
+  }
+
+  return {
+    id: song.source === 'kg'
+      ? `${song.songmid}_${meta.hash || ''}`
+      : `${song.source}_${song.songmid}`,
+    name: song.name,
+    singer: song.singer,
+    source: song.source,
+    interval: song.interval || '00:00',
+    meta,
+  };
+}
+
+function toOldMusicInfo(song) {
+  const _types = buildQualityMap(song);
+  return {
+    songmid: song.songmid,
+    name: song.name,
+    singer: song.singer,
+    source: song.source,
+    albumName: song.albumName || '',
+    albumId: song.albumId || '',
+    img: song.img || '',
+    interval: song.interval || '00:00',
+    strMediaMid: song.strMediaMid || '',
+    albumMid: song.albumMid || '',
+    songId: song.songId || '',
+    hash: song.hash || _types?.['128k']?.hash || '',
+    copyrightId: song.copyrightId || '',
+    lrcUrl: song.lrcUrl || '',
+    mrcUrl: song.mrcUrl || '',
+    trcUrl: song.trcUrl || '',
+    types: song.types || [],
+    _types,
+    typeUrl: {},
+  };
+}
+
+function getResolvedUrlPayload(resolved) {
+  const finalUrl = typeof resolved === 'string' ? resolved : resolved?.url || resolved?.data?.url;
+  const finalHeaders = typeof resolved === 'string' ? {} : resolved?.headers || resolved?.data?.headers || {};
+  return {
+    finalUrl,
+    finalHeaders,
+  };
+}
+
+async function resolveMusicUrl(sandboxInstance, song, quality) {
+  const attempts = [
+    { label: 'new', musicInfo: toNewMusicInfo(song) },
+    { label: 'old', musicInfo: toOldMusicInfo(song) },
+  ];
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    try {
+      const resolved = await sandboxInstance.requestUrl(song.source, 'musicUrl', {
+        type: quality,
+        musicInfo: attempt.musicInfo,
+      });
+      const payload = getResolvedUrlPayload(resolved);
+      if (payload.finalUrl && payload.finalUrl.startsWith('http')) return payload;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Download] ${attempt.label} musicInfo resolve failed:`, err.message);
+    }
+  }
+
+  if (lastError) throw lastError;
+  throw new Error('解析服务未返回有效链接');
+}
 
 async function getOrLoadSandbox(url) {
   if (loadedSandboxes[url]) return loadedSandboxes[url];
@@ -37,11 +148,11 @@ async function getOrLoadSandbox(url) {
     scriptContent = await proxyRes.text();
   }
   
-  const name = url.split('/').slice(-2, -1)[0] || '自定义音源';
-  const sandbox = await initLxSandbox(scriptContent, {
+  const name = url.split('/').slice(-2, -1)[0] || '解析服务';
+  const sandbox = await initResolverSandbox(scriptContent, {
     name: name,
     version: '4',
-    description: '官方自定义API音源',
+    description: '音乐解析服务',
   });
   
   loadedSandboxes[url] = sandbox;
@@ -77,9 +188,12 @@ let songToDownload = null;
 // Initialize Application
 async function init() {
   // Load saved script URL from localStorage if any
-  const savedUrl = localStorage.getItem('lx_script_url');
+  const legacyStorageKey = ['l', 'x_script_url'].join('');
+  const savedUrl = localStorage.getItem('resolver_script_url') || localStorage.getItem(legacyStorageKey);
   if (savedUrl) {
     state.scriptUrl = savedUrl;
+    localStorage.setItem('resolver_script_url', savedUrl);
+    localStorage.removeItem(legacyStorageKey);
   }
   el.scriptInput.value = state.scriptUrl;
 
@@ -159,7 +273,7 @@ function setupEventListeners() {
     const url = el.scriptInput.value.trim();
     if (url) {
       state.scriptUrl = url;
-      localStorage.setItem('lx_script_url', url);
+      localStorage.setItem('resolver_script_url', url);
       await loadMusicSource(url);
     }
   });
@@ -170,7 +284,7 @@ function setupEventListeners() {
       const url = btn.getAttribute('data-url');
       el.scriptInput.value = url;
       state.scriptUrl = url;
-      localStorage.setItem('lx_script_url', url);
+      localStorage.setItem('resolver_script_url', url);
       await loadMusicSource(url);
     });
   });
@@ -237,15 +351,22 @@ async function performSearch() {
   const keyword = el.searchInput.value.trim();
   if (!keyword) return;
 
+  if (state.searchAbortController) {
+    state.searchAbortController.abort();
+  }
+  state.searchRequestId += 1;
   state.currentPage = 1;
   state.currentKeyword = keyword;
   state.currentResults = []; // Clear previous batch
-  await fetchPage(state.currentPage);
+  state.totalCount = 0;
+  await fetchPage(state.currentPage, state.searchRequestId);
 }
 
 // Fetch Search Results for Specific Page (Waterfall Initial Page)
-async function fetchPage(page) {
+async function fetchPage(page, requestId = state.searchRequestId) {
   state.isLoading = true;
+  const controller = new AbortController();
+  state.searchAbortController = controller;
   el.songList.innerHTML = `
     <div class="empty-state">
       <div class="loading-spinner" style="width:30px; height:30px;"></div>
@@ -256,10 +377,11 @@ async function fetchPage(page) {
 
   try {
     const searchUrl = `/api/search?keyword=${encodeURIComponent(state.currentKeyword)}&source=${state.currentSource}&page=${page}&limit=${state.limit}`;
-    const res = await fetch(searchUrl);
+    const res = await fetch(searchUrl, { signal: controller.signal });
     if (!res.ok) throw new Error('Search request failed');
     
     const data = await res.json();
+    if (requestId !== state.searchRequestId) return;
     state.currentResults = data.list || [];
     
     if (page === 1) {
@@ -268,6 +390,7 @@ async function fetchPage(page) {
     
     renderSearchResults();
   } catch (err) {
+    if (err.name === 'AbortError' || requestId !== state.searchRequestId) return;
     console.error('[Search Error]', err);
     showToast('搜索失败，请重试', 'error');
     el.songList.innerHTML = `
@@ -277,12 +400,18 @@ async function fetchPage(page) {
     `;
     el.resultsCount.innerText = '共 0 首歌曲';
   } finally {
-    state.isLoading = false;
+    if (requestId === state.searchRequestId) {
+      state.isLoading = false;
+      if (state.searchAbortController === controller) {
+        state.searchAbortController = null;
+      }
+    }
   }
 }
 
 // Fetch Next Page (Waterfall Lazy Load Appender)
 async function loadNextPage() {
+  const requestId = state.searchRequestId;
   state.isLoading = true;
   state.currentPage += 1;
   
@@ -294,6 +423,7 @@ async function loadNextPage() {
     if (!res.ok) throw new Error('Search request failed');
     
     const data = await res.json();
+    if (requestId !== state.searchRequestId) return;
     const newSongs = data.list || [];
     
     if (newSongs.length === 0) {
@@ -303,12 +433,15 @@ async function loadNextPage() {
       appendSearchResults(newSongs);
     }
   } catch (err) {
+    if (requestId !== state.searchRequestId) return;
     console.error('[Lazy Load Error]', err);
     state.currentPage -= 1;
     showToast('获取更多歌曲失败', 'error');
   } finally {
-    state.isLoading = false;
-    showBottomLoadingIndicator(false);
+    if (requestId === state.searchRequestId) {
+      state.isLoading = false;
+      showBottomLoadingIndicator(false);
+    }
   }
 }
 
@@ -499,31 +632,6 @@ async function startDownloadTask(song, quality) {
 
     statusText.innerText = '正在解析链接...';
     updateDownloadProgressOnCard(song.songmid, song.source, 5);
-    
-    // Map song structure to old musicInfo schema expected by the custom script
-    const musicInfo = {
-      songmid: song.songmid,
-      name: song.name,
-      singer: song.singer,
-      source: song.source,
-      albumName: song.albumName || '',
-      albumId: song.albumId || '',
-      img: song.img || '',
-      interval: song.interval || '00:00',
-      strMediaMid: song.strMediaMid || '',
-      albumMid: song.albumMid || '',
-      songId: song.songId || '',
-      hash: song.hash || '',
-      copyrightId: song.copyrightId || '',
-      types: song.types || [],
-      _types: {}
-    };
-
-    if (song.types) {
-      song.types.forEach(t => {
-        musicInfo._types[t.type] = { size: t.size };
-      });
-    }
 
     // Try multiple script urls in priority order
     const urlsToTry = [state.scriptUrl, ...SOURCE_URLS.filter(u => u !== state.scriptUrl)];
@@ -533,18 +641,12 @@ async function startDownloadTask(song, quality) {
 
     for (const url of urlsToTry) {
       try {
-        const sourceName = url.split('/').slice(-2, -1)[0] || '未知音源';
-        statusText.innerText = `正在使用 ${sourceName} 音源解析...`;
+        const sourceName = url.split('/').slice(-2, -1)[0] || '解析服务';
+        statusText.innerText = `正在使用 ${sourceName} 解析...`;
         console.log(`[Download] Trying resolution with source: ${url}`);
         
         const sandboxInstance = await getOrLoadSandbox(url);
-        const resolved = await sandboxInstance.requestUrl(song.source, 'musicUrl', {
-          type: quality,
-          musicInfo: musicInfo,
-        });
-
-        const finalUrl = typeof resolved === 'string' ? resolved : resolved?.url || resolved?.data?.url;
-        const finalHeaders = typeof resolved === 'string' ? {} : resolved?.headers || resolved?.data?.headers || {};
+        const { finalUrl, finalHeaders } = await resolveMusicUrl(sandboxInstance, song, quality);
         if (finalUrl && finalUrl.startsWith('http')) {
           audioUrl = finalUrl;
           audioHeaders = finalHeaders;
@@ -557,10 +659,10 @@ async function startDownloadTask(song, quality) {
     }
 
     if (!audioUrl) {
-      throw new Error('所有音源解析均已失败');
+      throw new Error('所有解析服务均已失败');
     }
 
-    const sourceName = successfulUrl.split('/').slice(-2, -1)[0] || '未知音源';
+    const sourceName = successfulUrl.split('/').slice(-2, -1)[0] || '解析服务';
     statusText.innerText = `[${sourceName}] 正在建立连接...`;
     
     // Fetch via Cloudflare stream proxy using POST to safely transfer custom headers
@@ -641,7 +743,8 @@ async function startDownloadTask(song, quality) {
     // Detect if quality was downgraded by the source server
     let qualityWarnText = '';
     let isDowngraded = false;
-    if (quality.startsWith('flac') && !contentType.includes('flac')) {
+    const isClearlyLossy = /mpeg|mp3|mp4|m4a|aac/i.test(contentType);
+    if (quality.startsWith('flac') && isClearlyLossy) {
       qualityWarnText = ' (已降级为高品质MP3)';
       isDowngraded = true;
     }

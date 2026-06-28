@@ -26,32 +26,65 @@ async function handleDownload(url, filename, headers) {
   }
 
   try {
+    let targetUrl;
+    try {
+      targetUrl = new URL(url);
+    } catch (_) {
+      return new Response('Invalid URL parameter', {
+        status: 400,
+        headers: { 'Access-Control-Allow-Origin': '*' }
+      });
+    }
+
     const fetchHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Range': 'bytes=0-',
     };
 
     // Apply specific Referers to bypass CDN protections
-    if (url.includes('qqmusic') || url.includes('qq.com') || url.includes('qpic.cn')) {
+    if (targetUrl.hostname.includes('qqmusic') || targetUrl.hostname.includes('qq.com') || targetUrl.hostname.includes('qpic.cn')) {
       fetchHeaders['Referer'] = 'https://y.qq.com/';
-    } else if (url.includes('126.net') || url.includes('163.com') || url.includes('127.net')) {
+      fetchHeaders['Origin'] = 'https://y.qq.com';
+    } else if (targetUrl.hostname.includes('126.net') || targetUrl.hostname.includes('163.com') || targetUrl.hostname.includes('127.net')) {
       fetchHeaders['Referer'] = 'https://music.163.com/';
-    } else if (url.includes('kuwo.cn')) {
+      fetchHeaders['Origin'] = 'https://music.163.com';
+    } else if (targetUrl.hostname.includes('kuwo.cn')) {
       fetchHeaders['Referer'] = 'http://www.kuwo.cn/';
-    } else if (url.includes('migu.cn')) {
+      fetchHeaders['Origin'] = 'http://www.kuwo.cn';
+    } else if (targetUrl.hostname.includes('migu.cn')) {
       fetchHeaders['Referer'] = 'https://music.migu.cn/';
+      fetchHeaders['Origin'] = 'https://music.migu.cn';
+    } else if (targetUrl.hostname.includes('kugou.com')) {
+      fetchHeaders['Referer'] = 'https://www.kugou.com/';
+      fetchHeaders['Origin'] = 'https://www.kugou.com';
     }
 
     // Merge custom headers from the script
     if (headers) {
-      Object.assign(fetchHeaders, headers);
+      for (const [key, value] of Object.entries(headers)) {
+        if (value == null) continue;
+        const lowerKey = key.toLowerCase();
+        if (lowerKey === 'host' || lowerKey === 'content-length') continue;
+        fetchHeaders[key] = value;
+      }
     }
 
     console.log(`[Download Proxy] Streaming from: ${url}`);
     const res = await fetch(url, { headers: fetchHeaders });
     
     if (!res.ok) {
-      return new Response(`Failed to fetch media file: ${res.statusText}`, {
+      return new Response(`Failed to fetch media file: ${res.status} ${res.statusText}`, {
         status: res.status,
+        headers: { 'Access-Control-Allow-Origin': '*' }
+      });
+    }
+
+    const originalType = res.headers.get('content-type') || '';
+    if (/text\/html|application\/json/i.test(originalType)) {
+      const preview = (await res.text()).slice(0, 300);
+      return new Response(`Media URL returned ${originalType || 'non-audio'} content: ${preview}`, {
+        status: 502,
         headers: { 'Access-Control-Allow-Origin': '*' }
       });
     }
@@ -67,7 +100,6 @@ async function handleDownload(url, filename, headers) {
     
     // Set attachment headers for downloading
     responseHeaders.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-    const originalType = res.headers.get('content-type');
     if (originalType) {
       responseHeaders.set('Content-Type', originalType);
     } else {

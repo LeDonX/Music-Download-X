@@ -1,11 +1,11 @@
 # Music Download X
 
-基于自定义音源的纯前端高品质音乐搜索与下载工具，采用苹果液态玻璃风设计，并支持 Cloudflare Pages 部署。
+纯前端高品质音乐搜索与下载工具，采用简洁界面设计，并支持 Cloudflare Pages 部署。
 
 ## 📦 项目结构
 
 - `/public`: 包含前端的 HTML, CSS, JavaScript 等静态文件资源。
-- `/functions/api`: 包含 Cloudflare Pages Functions 接口（跨域代理、搜索解析、流式下载代理）。
+- `/functions/api`: 包含 Cloudflare Pages Functions 接口（跨域代理、搜索接口、流式下载代理）。
 
 ## 🚀 本地开发与调试
 

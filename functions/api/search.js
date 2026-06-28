@@ -18,6 +18,48 @@ function decodeHTML(str) {
     .replace(/&nbsp;/g, ' ');
 }
 
+function sizeFormat(size) {
+  const n = Number(size);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(2)}G`;
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}M`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)}K`;
+  return `${n}B`;
+}
+
+function addQuality(types, _types, type, size, extra = {}) {
+  if (size == null || size === '') return;
+  if (typeof size === 'number' && size <= 0) return;
+  if (typeof size === 'string' && size.trim() === '0') return;
+  const sizeText = typeof size === 'string' ? size : sizeFormat(size);
+  if (!sizeText) return;
+  types.push({ type, size: sizeText, ...extra });
+  _types[type] = { size: sizeText, ...extra };
+}
+
+function createSearchResponse(payload, headers) {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers,
+  });
+}
+
+async function retry(fn, maxRetries = 3) {
+  let lastError;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const result = await fn(i);
+      if (result) return result;
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Search Retry] attempt ${i + 1} failed:`, err);
+    }
+    await new Promise(resolve => setTimeout(resolve, 80 * (i + 1)));
+  }
+  if (lastError) throw lastError;
+  return null;
+}
+
 const PART_1_INDEXES = [23, 14, 6, 36, 16, 40, 7, 19];
 const PART_2_INDEXES = [16, 1, 32, 12, 19, 27, 8, 5];
 const SCRAMBLE_VALUES = [89, 39, 179, 150, 218, 82, 58, 252, 177, 52, 186, 123, 120, 64, 242, 133, 143, 161, 121, 179];
@@ -64,20 +106,26 @@ export async function onRequestGet(context) {
   try {
     if (source === "wy") {
       const url = `https://music.163.com/api/cloudsearch/pc?s=${encodeURIComponent(keyword)}&type=1&offset=${(page - 1) * limit}&limit=${limit}`;
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Referer": "https://music.163.com/"
-        }
+      const json = await retry(async () => {
+        const res = await fetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://music.163.com/"
+          }
+        });
+        if (!res.ok) throw new Error(`NetEase search HTTP ${res.status}`);
+        const body = await res.json();
+        return body?.result ? body : null;
       });
-      const json = await res.json();
       const rawList = json.result?.songs || [];
       const total = json.result?.songCount || 0;
       const list = rawList.map((song) => {
-        const types = [{ type: "128k", size: song.l ? `${(song.l.size / 1024 / 1024).toFixed(1)}M` : "1.2M" }];
-        if (song.h) types.push({ type: "320k", size: `${(song.h.size / 1024 / 1024).toFixed(1)}M` });
-        if (song.sq) types.push({ type: "flac", size: `${(song.sq.size / 1024 / 1024).toFixed(1)}M` });
-        if (song.hr) types.push({ type: "flac24bit", size: `${(song.hr.size / 1024 / 1024).toFixed(1)}M` });
+        const types = [];
+        const _types = {};
+        addQuality(types, _types, "128k", song.l?.size || 1.2 * 1024 * 1024);
+        addQuality(types, _types, "320k", song.h?.size);
+        addQuality(types, _types, "flac", song.sq?.size);
+        addQuality(types, _types, "flac24bit", song.hr?.size);
         return {
           songmid: song.id.toString(),
           name: song.name,
@@ -87,19 +135,14 @@ export async function onRequestGet(context) {
           img: song.al?.picUrl || "",
           interval: formatPlayTime(song.dt / 1e3),
           source: "wy",
-          types
+          types,
+          _types,
+          typeUrl: {}
         };
       });
-      return new Response(JSON.stringify({ list, total, page, limit, source: "wy" }), {
-        status: 200,
-        headers: responseHeaders
-      });
+      return createSearchResponse({ list, total, page, limit, allPage: Math.ceil(total / limit), source: "wy" }, responseHeaders);
     } else if (source === "tx") {
-      let json = null;
-      let retries = 0;
-      const maxRetries = 5;
-      
-      while (retries < maxRetries) {
+      const json = await retry(async () => {
         const searchid = Math.random().toString().slice(2);
         const requestPayload = {
           comm: {
@@ -155,37 +198,30 @@ export async function onRequestGet(context) {
         const sign = await zzcSign(payloadStr);
         const url = `https://u.y.qq.com/cgi-bin/musics.fcg?sign=${sign}`;
 
-        try {
-          const res = await fetch(url, {
-            method: "POST",
-            headers: {
-              "User-Agent": "QQMusic 14090508(android 12)",
-              "Content-Type": "application/json"
-            },
-            body: payloadStr
-          });
-          json = await res.json();
-          if (json && json.code === 0 && json.req && json.req.code === 0) {
-            break; // Succeeded!
-          }
-        } catch (e) {
-          console.warn(`QQ Music Search try ${retries} failed:`, e);
-        }
-        retries++;
-        await new Promise(r => setTimeout(r, 50)); // Small delay between retries
-      }
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "User-Agent": "QQMusic 14090508(android 12)",
+            "Content-Type": "application/json"
+          },
+          body: payloadStr
+        });
+        if (!res.ok) throw new Error(`QQ Music search HTTP ${res.status}`);
+        const body = await res.json();
+        return body?.code === 0 && body?.req?.code === 0 ? body : null;
+      }, 5);
 
       const rawList = json?.req?.data?.body?.item_song || json?.req?.data?.item_song || [];
       const total = json?.req?.data?.body?.meta?.estimate_sum || json?.req?.data?.meta?.estimate_sum || 0;
-      const list = rawList.map((item) => {
+      const list = rawList.filter(item => item.file?.media_mid).map((item) => {
         const albummid = item.album?.mid || "";
         const file = item.file || {};
         const types = [];
-        if (file.size_128mp3) types.push({ type: "128k", size: `${(file.size_128mp3 / 1024 / 1024).toFixed(1)}M` });
-        else types.push({ type: "128k", size: "1.2M" });
-        if (file.size_320mp3) types.push({ type: "320k", size: `${(file.size_320mp3 / 1024 / 1024).toFixed(1)}M` });
-        if (file.size_flac) types.push({ type: "flac", size: `${(file.size_flac / 1024 / 1024).toFixed(1)}M` });
-        if (file.size_hires) types.push({ type: "flac24bit", size: `${(file.size_hires / 1024 / 1024).toFixed(1)}M` });
+        const _types = {};
+        addQuality(types, _types, "128k", file.size_128mp3 || 1.2 * 1024 * 1024);
+        addQuality(types, _types, "320k", file.size_320mp3);
+        addQuality(types, _types, "flac", file.size_flac);
+        addQuality(types, _types, "flac24bit", file.size_hires);
         return {
           songmid: item.mid || "",
           name: item.title || "",
@@ -198,41 +234,58 @@ export async function onRequestGet(context) {
           strMediaMid: file.media_mid || "",
           albumMid: albummid,
           songId: item.id?.toString() || "",
-          types
+          types,
+          _types,
+          typeUrl: {}
         };
       });
-      return new Response(JSON.stringify({ list, total, page, limit, source: "tx" }), {
-        status: 200,
-        headers: responseHeaders
-      });
+      return createSearchResponse({ list, total, page, limit, allPage: Math.ceil(total / limit), source: "tx" }, responseHeaders);
     } else if (source === "kw") {
       const url = `http://search.kuwo.cn/r.s?client=kt&all=${encodeURIComponent(keyword)}&pn=${page - 1}&rn=${limit}&uid=794762570&ver=kwplayer_ar_9.2.2.1&vipver=1&show_copyright_off=1&newver=1&ft=music&cluster=0&strategy=2012&encoding=utf8&rformat=json&vermerge=1&mobi=1&issubtitle=1`;
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-      });
-      const text = await res.text();
-      let json = {};
-      try {
-        json = JSON.parse(text);
-      } catch (err) {
-        console.error("Failed to parse Kuwo response:", err);
-      }
+      const json = await retry(async () => {
+        const res = await fetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          }
+        });
+        if (!res.ok) throw new Error(`Kuwo search HTTP ${res.status}`);
+        const text = await res.text();
+        const body = JSON.parse(text);
+        if (body.TOTAL !== "0" && body.SHOW === "0") return null;
+        return body;
+      }, 3);
       const rawList = json.abslist || [];
       const total = parseInt(json.TOTAL || "0", 10);
       const list = rawList.map((item) => {
         const rid = (item.MUSICRID || "").replace("MUSIC_", "");
-        const formats = item.FORMATS || "";
-        const types = [{ type: "128k", size: "1.2M" }];
-        if (formats.includes("MP3320") || formats.includes("320")) {
-          types.push({ type: "320k", size: "3.0M" });
+        const types = [];
+        const _types = {};
+        const minfo = item.N_MINFO || "";
+        const minfoItems = minfo.split(";");
+        for (const infoText of minfoItems) {
+          const match = infoText.match(/level:(\w+),bitrate:(\d+),format:(\w+),size:([\w.]+)/);
+          if (!match) continue;
+          switch (match[2]) {
+            case "4000":
+              addQuality(types, _types, "flac24bit", match[4]);
+              break;
+            case "2000":
+              addQuality(types, _types, "flac", match[4]);
+              break;
+            case "320":
+              addQuality(types, _types, "320k", match[4]);
+              break;
+            case "128":
+              addQuality(types, _types, "128k", match[4]);
+              break;
+          }
         }
-        if (formats.includes("FLAC") || formats.includes("ape")) {
-          types.push({ type: "flac", size: "10M" });
-        }
-        if (formats.includes("HIRES")) {
-          types.push({ type: "flac24bit", size: "25M" });
+        if (!types.length) {
+          const formats = item.FORMATS || "";
+          addQuality(types, _types, "128k", "1.2M");
+          if (formats.includes("MP3320") || formats.includes("320")) addQuality(types, _types, "320k", "3.0M");
+          if (formats.includes("FLAC") || formats.includes("ape")) addQuality(types, _types, "flac", "10M");
+          if (formats.includes("HIRES")) addQuality(types, _types, "flac24bit", "25M");
         }
         return {
           songmid: rid,
@@ -243,28 +296,33 @@ export async function onRequestGet(context) {
           img: item.web_albumpic_short ? 'https://img4.kuwo.cn/wmvpic/' + item.web_albumpic_short : (item.hts_MVPIC || ''),
           interval: formatPlayTime(parseInt(item.DURATION, 10) || 0),
           source: "kw",
-          types
+          types: types.reverse(),
+          _types,
+          typeUrl: {}
         };
       });
-      return new Response(JSON.stringify({ list, total, page, limit, source: "kw" }), {
-        status: 200,
-        headers: responseHeaders
-      });
+      return createSearchResponse({ list, total, page, limit, allPage: Math.ceil(total / limit), source: "kw" }, responseHeaders);
     } else if (source === "kg") {
-      const url = `https://songsearch.kugou.com/song_search_v2?keyword=${encodeURIComponent(keyword)}&page=${page}&pagesize=${limit}&userid=-1&clientver=&platform=WebFilter&tag=em&filter=2&iscorrect=1&privilege_filter=0`;
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-      });
-      const json = await res.json();
+      const url = `https://songsearch.kugou.com/song_search_v2?keyword=${encodeURIComponent(keyword)}&page=${page}&pagesize=${limit}&userid=0&clientver=&platform=WebFilter&filter=2&iscorrection=1&privilege_filter=0&area_code=1`;
+      const json = await retry(async () => {
+        const res = await fetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          }
+        });
+        if (!res.ok) throw new Error(`Kugou search HTTP ${res.status}`);
+        const body = await res.json();
+        return body?.error_code === 0 ? body : null;
+      }, 3);
       const rawList = json.data?.lists || [];
       const total = json.data?.total || 0;
       const list = rawList.map((item) => {
-        const types = [{ type: "128k", size: item.FileSize ? `${(item.FileSize / 1024 / 1024).toFixed(1)}M` : "1.2M" }];
-        if (item.HQFileSize) types.push({ type: "320k", size: `${(item.HQFileSize / 1024 / 1024).toFixed(1)}M` });
-        if (item.SQFileSize) types.push({ type: "flac", size: `${(item.SQFileSize / 1024 / 1024).toFixed(1)}M` });
-        if (item.ResFileSize) types.push({ type: "flac24bit", size: `${(item.ResFileSize / 1024 / 1024).toFixed(1)}M` });
+        const types = [];
+        const _types = {};
+        addQuality(types, _types, "128k", item.FileSize || 1.2 * 1024 * 1024, { hash: item.FileHash });
+        addQuality(types, _types, "320k", item.HQFileSize, { hash: item.HQFileHash });
+        addQuality(types, _types, "flac", item.SQFileSize, { hash: item.SQFileHash });
+        addQuality(types, _types, "flac24bit", item.ResFileSize, { hash: item.ResFileHash });
         return {
           songmid: item.Audioid ? item.Audioid.toString() : item.FileHash,
           name: decodeHTML(item.SongName.replace(/<em>|<\/em>/g, "")),
@@ -275,35 +333,40 @@ export async function onRequestGet(context) {
           interval: formatPlayTime(item.Duration || 0),
           source: "kg",
           hash: item.FileHash,
-          types
+          types,
+          _types,
+          typeUrl: {}
         };
       });
-      return new Response(JSON.stringify({ list, total, page, limit, source: "kg" }), {
-        status: 200,
-        headers: responseHeaders
-      });
+      return createSearchResponse({ list, total, page, limit, allPage: Math.ceil(total / limit), source: "kg" }, responseHeaders);
     } else if (source === "mg") {
       const url = `https://app.c.nf.migu.cn/MIGUM2.0/v1.0/content/search_all.do?isCopyright=1&isCorrect=1&pageNo=${page}&pageSize=${limit}&searchSwitch=%7B%22song%22:1%7D&text=${encodeURIComponent(keyword)}`;
-      const res = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Referer": "https://m.music.migu.cn/"
-        }
+      const json = await retry(async () => {
+        const res = await fetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://m.music.migu.cn/"
+          }
+        });
+        if (!res.ok) throw new Error(`Migu search HTTP ${res.status}`);
+        const body = await res.json();
+        return body?.songResultData ? body : null;
       });
-      const json = await res.json();
-      const rawList = json.songResultData?.result || [];
+      const rawList = (json.songResultData?.result || []).slice(0, limit);
       const total = parseInt(json.songResultData?.totalCount || "0", 10);
       const list = rawList.map((item) => {
-        const types = [{ type: "128k", size: "1.2M" }];
+        const types = [];
+        const _types = {};
+        addQuality(types, _types, "128k", "1.2M");
         const newFormats = item.newRateFormats || [];
         newFormats.forEach((fmt) => {
-          const sizeStr = fmt.size ? `${(fmt.size / 1024 / 1024).toFixed(1)}M` : "";
+          const size = fmt.size || fmt.androidSize || "";
           if (fmt.formatType === "HQ") {
-            types.push({ type: "320k", size: sizeStr || "3.0M" });
+            addQuality(types, _types, "320k", size || "3.0M");
           } else if (fmt.formatType === "SQ") {
-            types.push({ type: "flac", size: sizeStr || "10M" });
+            addQuality(types, _types, "flac", size || "10M");
           } else if (fmt.formatType === "ZQ") {
-            types.push({ type: "flac24bit", size: sizeStr || "25M" });
+            addQuality(types, _types, "flac24bit", size || "25M");
           }
         });
         let img = "";
@@ -321,13 +384,15 @@ export async function onRequestGet(context) {
           interval: null,
           source: "mg",
           copyrightId: item.copyrightId || "",
-          types
+          lrcUrl: item.lyricUrl || item.lrcUrl || "",
+          mrcUrl: item.mrcurl || item.mrcUrl || "",
+          trcUrl: item.trcUrl || "",
+          types,
+          _types,
+          typeUrl: {}
         };
       });
-      return new Response(JSON.stringify({ list, total, page, limit, source: "mg" }), {
-        status: 200,
-        headers: responseHeaders
-      });
+      return createSearchResponse({ list, total, page, limit, allPage: Math.ceil(total / limit), source: "mg" }, responseHeaders);
     }
     return new Response(JSON.stringify({ error: "Unsupported source" }), {
       status: 400,
