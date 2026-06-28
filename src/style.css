@@ -58,6 +58,12 @@ select {
   -webkit-appearance: none;
 }
 
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
 button,
 [role="button"],
 .custom-select,
@@ -431,7 +437,7 @@ body {
   outline: none;
   color: var(--text-primary);
   padding: 10px 42px 10px 18px;
-  font-size: 0.95rem;
+  font-size: 16px;
   min-width: 0;
 }
 
@@ -1098,7 +1104,7 @@ body {
 
   .search-input {
     padding: 8px 36px 8px 10px;
-    font-size: 0.85rem;
+    font-size: 16px;
   }
 
   .clear-search-btn {
