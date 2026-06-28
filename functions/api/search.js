@@ -176,6 +176,37 @@ function createMiguSignature(time, keyword) {
   return { sign, deviceId };
 }
 
+function addNeteaseQuality(types, _types, type, fileInfo, songmid, fallbackSize = "") {
+  const size = fileInfo?.size || fallbackSize;
+  if (!size) return;
+  addQuality(types, _types, type, size, { hash: songmid });
+}
+
+function addNeteaseQualities(types, _types, song, songmid) {
+  const privilege = song.privilege || {};
+  const maxbr = Number(privilege.maxbr || privilege.playMaxbr || privilege.pl || 0);
+
+  if (privilege.maxBrLevel === "hires") {
+    addNeteaseQuality(types, _types, "flac24bit", song.hr, songmid, "25M");
+  }
+
+  switch (maxbr) {
+    case 999000:
+      addNeteaseQuality(types, _types, "flac", song.sq, songmid, "10M");
+    case 320000:
+      addNeteaseQuality(types, _types, "320k", song.h, songmid, "3.0M");
+    case 192000:
+    case 128000:
+      addNeteaseQuality(types, _types, "128k", song.l, songmid, 1.2 * 1024 * 1024);
+      break;
+    default:
+      if (song.l) addNeteaseQuality(types, _types, "128k", song.l, songmid);
+      break;
+  }
+
+  types.reverse();
+}
+
 export async function onRequestGet(context) {
   const { searchParams } = new URL(context.request.url);
   const keyword = searchParams.get("keyword") || "";
@@ -215,17 +246,17 @@ export async function onRequestGet(context) {
         const songmid = song.id.toString();
         const types = [];
         const _types = {};
-        addQuality(types, _types, "128k", song.l?.size || 1.2 * 1024 * 1024, { hash: songmid });
-        addQuality(types, _types, "320k", song.h?.size, { hash: songmid });
-        addQuality(types, _types, "flac", song.sq?.size, { hash: songmid });
-        addQuality(types, _types, "flac24bit", song.hr?.size, { hash: songmid });
+        addNeteaseQualities(types, _types, song, songmid);
+        if (!types.length) {
+          addQuality(types, _types, "128k", song.l?.size || 1.2 * 1024 * 1024, { hash: songmid });
+        }
         return {
           songmid,
           name: song.name,
           singer: (song.ar || []).map((a) => a.name).join("\u3001"),
           albumName: song.al?.name || "",
           albumId: song.al?.id?.toString() || "",
-          img: song.al?.picUrl || "",
+          img: song.al?.picUrl ? `${song.al.picUrl}${song.al.picUrl.includes('?') ? '&' : '?'}param=500y500` : "",
           interval: formatPlayTime(song.dt / 1e3),
           source: "wy",
           types,
@@ -322,7 +353,7 @@ export async function onRequestGet(context) {
           singer: (item.singer || []).map((s) => s.name).join("\u3001"),
           albumName: item.album?.name || "",
           albumId: albummid,
-          img: albummid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albummid}.jpg` : "",
+          img: albummid ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${albummid}.jpg` : "",
           interval: formatPlayTime(item.interval),
           source: "tx",
           strMediaMid: file.media_mid || "",
@@ -387,7 +418,7 @@ export async function onRequestGet(context) {
           singer: decodeHTML(item.ARTIST).replace(/&/g, "\u3001"),
           albumName: decodeHTML(item.ALBUM || ""),
           albumId: item.ALBUMID || "",
-          img: item.web_albumpic_short ? 'https://img4.kuwo.cn/wmvpic/' + item.web_albumpic_short : (item.hts_MVPIC || ''),
+          img: "",
           interval: formatPlayTime(parseInt(item.DURATION, 10) || 0),
           source: "kw",
           types: types.reverse(),

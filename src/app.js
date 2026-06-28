@@ -12,15 +12,16 @@ const SOURCE_URLS = [
 const loadedSandboxes = {};
 const PLATFORM_IDS = ['kw', 'kg', 'tx', 'wy', 'mg'];
 const PLATFORM_NAMES = {
-  kw: '酷我音乐',
-  kg: '酷狗音乐',
-  tx: 'QQ音乐',
-  wy: '网易云音乐',
-  mg: '咪咕音乐',
+  kw: '酷我',
+  kg: '酷狗',
+  tx: 'QQ',
+  wy: '网易',
+  mg: '咪咕',
 };
 const SEARCH_TIMEOUT_MS = 18000;
 const SEARCH_EMPTY_RETRY_LIMIT = 3;
 const SEARCH_RETRY_DELAYS = [250, 700, 1400];
+const ORDERED_QUALITIES = new Set(['128k', '320k', 'flac', 'flac24bit']);
 
 // Application State
 const state = {
@@ -152,10 +153,97 @@ function toOldMusicInfo(song) {
 function getResolvedUrlPayload(resolved) {
   const finalUrl = typeof resolved === 'string' ? resolved : resolved?.url || resolved?.data?.url;
   const finalHeaders = typeof resolved === 'string' ? {} : resolved?.headers || resolved?.data?.headers || {};
+  const finalType = typeof resolved === 'string'
+    ? ''
+    : normalizeQualityType(resolved?.type || resolved?.data?.type || resolved?.quality || resolved?.data?.quality);
   return {
     finalUrl,
     finalHeaders,
+    finalType,
   };
+}
+
+function normalizeQualityType(type) {
+  if (type == null || type === '') return '';
+  const value = String(type).trim().toLowerCase();
+  if (!value) return '';
+
+  if (['flac24bit', 'flac24', '24bit', 'hires', 'hr'].includes(value)) return 'flac24bit';
+  if (['flac', 'lossless', 'sq', '999', '999k', '999000'].includes(value)) return 'flac';
+  if (['320', '320k', '320000', 'exhigh'].includes(value)) return '320k';
+  if (['128', '128k', '128000', 'standard'].includes(value)) return '128k';
+  return value;
+}
+
+function formatQualityLabel(type) {
+  const value = normalizeQualityType(type);
+  if (value === 'flac24bit') return 'Hi-Res';
+  if (value === 'flac') return 'FLAC';
+  if (value === '320k') return '320K';
+  if (value === '128k') return '128K';
+  return String(type || '').toUpperCase();
+}
+
+function getDefaultExtensionForQuality(quality) {
+  const value = normalizeQualityType(quality);
+  return value.startsWith('flac') ? 'flac' : 'mp3';
+}
+
+function getExtensionFromUrl(url) {
+  if (!url) return '';
+  try {
+    const pathname = new URL(url).pathname.toLowerCase();
+    const match = pathname.match(/\.([a-z0-9]+)$/);
+    const ext = match?.[1] || '';
+    if (['flac', 'mp3', 'm4a', 'aac', 'ogg', 'wav'].includes(ext)) return ext;
+  } catch (_) {
+    return '';
+  }
+  return '';
+}
+
+function getExtensionFromMedia(contentType, fallbackExt, url = '') {
+  const value = String(contentType || '').toLowerCase();
+  if (value.includes('flac')) return 'flac';
+  if (value.includes('mpeg') || value.includes('mp3')) return 'mp3';
+  if (value.includes('m4a') || value.includes('mp4') || value.includes('aac')) return 'm4a';
+  if (value.includes('ogg')) return 'ogg';
+  if (value.includes('wav')) return 'wav';
+  return getExtensionFromUrl(url) || fallbackExt;
+}
+
+function getActualQuality(selectedQuality, resolvedQuality, actualExt) {
+  const selected = normalizeQualityType(selectedQuality) || selectedQuality;
+  const resolved = normalizeQualityType(resolvedQuality);
+  if (resolved) {
+    if (!ORDERED_QUALITIES.has(resolved) && !selected.startsWith('flac')) return selected;
+    if (selected.startsWith('flac') && resolved === selected && actualExt !== 'flac') return actualExt;
+    return resolved;
+  }
+  if (selected.startsWith('flac') && actualExt !== 'flac') return actualExt;
+  if (!selected.startsWith('flac') && actualExt === 'flac') return 'flac';
+  return selected;
+}
+
+function getDownloadMediaInfo(contentType, selectedQuality, resolvedQuality, url = '') {
+  const selected = normalizeQualityType(selectedQuality) || selectedQuality;
+  const resolverQuality = normalizeQualityType(resolvedQuality);
+  const actualExt = getExtensionFromMedia(contentType, getDefaultExtensionForQuality(resolverQuality || selected), url);
+  const actualQuality = getActualQuality(selected, resolverQuality, actualExt);
+  const isQualityChanged = Boolean(actualQuality) && actualQuality !== selected;
+  return {
+    selectedQuality: selected,
+    resolverQuality,
+    actualExt,
+    actualQuality,
+    isQualityChanged,
+  };
+}
+
+function shouldRejectQualityMismatch(mediaInfo) {
+  if (!mediaInfo.isQualityChanged) return false;
+  if (ORDERED_QUALITIES.has(mediaInfo.actualQuality)) return true;
+  return mediaInfo.selectedQuality.startsWith('flac') && mediaInfo.actualExt !== 'flac';
 }
 
 function getResolverName(url) {
@@ -165,6 +253,11 @@ function getResolverName(url) {
 
 function getPlatformName(source) {
   return PLATFORM_NAMES[source] || source || '未知平台';
+}
+
+function getImageProxyUrl(url) {
+  if (!url || !/^https?:\/\//i.test(url)) return '';
+  return `/api/image?url=${encodeURIComponent(url)}`;
 }
 
 async function resolveMusicUrl(sandboxInstance, song, quality) {
@@ -356,7 +449,7 @@ async function findAlternativeSongs(song, quality) {
   return ranked.sort((a, b) => b._fallbackScore - a._fallbackScore).map(({ _fallbackScore, ...candidate }) => candidate);
 }
 
-async function resolveWithScripts(song, quality, statusText) {
+async function resolveWithScripts(song, quality, statusText, validateResolution) {
   const urlsToTry = [state.scriptUrl, ...SOURCE_URLS.filter(u => u !== state.scriptUrl)];
   let lastError = null;
 
@@ -367,14 +460,17 @@ async function resolveWithScripts(song, quality, statusText) {
       console.log(`[Download] Trying resolution with resolver: ${url}`);
 
       const sandboxInstance = await getOrLoadSandbox(url);
-      const { finalUrl, finalHeaders } = await resolveMusicUrl(sandboxInstance, song, quality);
+      const { finalUrl, finalHeaders, finalType } = await resolveMusicUrl(sandboxInstance, song, quality);
       if (finalUrl && finalUrl.startsWith('http')) {
-        return {
+        const resolution = {
           audioUrl: finalUrl,
           audioHeaders: finalHeaders,
+          resolvedQuality: finalType,
           successfulUrl: url,
           resolvedSong: song,
         };
+        if (validateResolution) return await validateResolution(resolution);
+        return resolution;
       }
     } catch (err) {
       lastError = err;
@@ -386,8 +482,7 @@ async function resolveWithScripts(song, quality, statusText) {
   throw new Error('解析服务未返回有效链接');
 }
 
-async function createDownloadResponse(song, quality, filename, statusText) {
-  const resolution = await resolveWithScripts(song, quality, statusText);
+async function createDownloadResponseFromResolution(resolution, quality, filename, statusText) {
   const sourceName = getResolverName(resolution.successfulUrl);
   statusText.innerText = `[${sourceName}] 正在建立连接...`;
 
@@ -407,7 +502,19 @@ async function createDownloadResponse(song, quality, filename, statusText) {
     throw new Error(detail || `流式代理连接失败 (${response.status})`);
   }
 
-  return { response, resolution };
+  const mediaInfo = getDownloadMediaInfo(response.headers.get('Content-Type') || '', quality, resolution.resolvedQuality, resolution.audioUrl);
+  if (shouldRejectQualityMismatch(mediaInfo)) {
+    if (response.body) await response.body.cancel().catch(() => {});
+    throw new Error(`解析规格不一致：选择 ${formatQualityLabel(mediaInfo.selectedQuality)}，实际 ${formatQualityLabel(mediaInfo.actualQuality)}`);
+  }
+
+  return { response, resolution, mediaInfo };
+}
+
+async function createDownloadResponse(song, quality, filename, statusText) {
+  return resolveWithScripts(song, quality, statusText, (resolution) => {
+    return createDownloadResponseFromResolution(resolution, quality, filename, statusText);
+  });
 }
 
 async function createDownloadResponseWithFallback(song, quality, filename, statusText) {
@@ -434,6 +541,156 @@ async function createDownloadResponseWithFallback(song, quality, filename, statu
   }
 
   throw lastError || new Error('所有平台均解析失败');
+}
+
+function syncsafe(size) {
+  return [
+    (size >> 21) & 0x7f,
+    (size >> 14) & 0x7f,
+    (size >> 7) & 0x7f,
+    size & 0x7f,
+  ];
+}
+
+function uint32be(size) {
+  return [
+    (size >> 24) & 0xff,
+    (size >> 16) & 0xff,
+    (size >> 8) & 0xff,
+    size & 0xff,
+  ];
+}
+
+function concatUint8Arrays(arrays) {
+  const total = arrays.reduce((sum, item) => sum + item.length, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const item of arrays) {
+    output.set(item, offset);
+    offset += item.length;
+  }
+  return output;
+}
+
+function createTextFrame(id, text) {
+  const value = String(text || '').trim();
+  if (!value) return null;
+  const payload = new Uint8Array(value.length * 2 + 2);
+  payload[0] = 0xff;
+  payload[1] = 0xfe;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    payload[i * 2 + 2] = code & 0xff;
+    payload[i * 2 + 3] = code >> 8;
+  }
+  const content = concatUint8Arrays([new Uint8Array([0x01]), payload]);
+  return concatUint8Arrays([
+    new TextEncoder().encode(id),
+    new Uint8Array(uint32be(content.length)),
+    new Uint8Array([0, 0]),
+    content,
+  ]);
+}
+
+function createApicFrame(imageBytes, mimeType) {
+  if (!imageBytes?.length || !mimeType) return null;
+  const mime = new TextEncoder().encode(mimeType);
+  const content = concatUint8Arrays([
+    new Uint8Array([0x00]),
+    mime,
+    new Uint8Array([0x00, 0x03]),
+    new Uint8Array([0x00]),
+    imageBytes,
+  ]);
+  return concatUint8Arrays([
+    new TextEncoder().encode('APIC'),
+    new Uint8Array(uint32be(content.length)),
+    new Uint8Array([0, 0]),
+    content,
+  ]);
+}
+
+function stripExistingId3(bytes) {
+  if (
+    bytes.length > 10 &&
+    bytes[0] === 0x49 &&
+    bytes[1] === 0x44 &&
+    bytes[2] === 0x33
+  ) {
+    const size = (bytes[6] << 21) | (bytes[7] << 14) | (bytes[8] << 7) | bytes[9];
+    return bytes.slice(10 + size);
+  }
+  return bytes;
+}
+
+async function fetchCoverBytes(song) {
+  const coverUrl = await getBestCoverUrl(song);
+  if (!coverUrl) return null;
+  try {
+    const res = await fetch(getImageProxyUrl(coverUrl), { cache: 'force-cache' });
+    if (!res.ok) return null;
+    const contentType = res.headers.get('Content-Type') || 'image/jpeg';
+    if (!/^image\/(jpeg|jpg|png)$/i.test(contentType)) return null;
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (!bytes.length) return null;
+    return {
+      bytes,
+      mimeType: contentType.replace('image/jpg', 'image/jpeg').split(';')[0],
+      url: coverUrl,
+    };
+  } catch (err) {
+    console.warn('[Download] cover fetch failed:', err.message);
+    return null;
+  }
+}
+
+async function embedMp3Metadata(audioBytes, song) {
+  const frames = [
+    createTextFrame('TIT2', song.name),
+    createTextFrame('TPE1', String(song.singer || '').replace(/、/g, ';')),
+    createTextFrame('TALB', song.albumName),
+  ].filter(Boolean);
+
+  const cover = await fetchCoverBytes(song);
+  const apic = cover ? createApicFrame(cover.bytes, cover.mimeType) : null;
+  if (apic) frames.push(apic);
+  if (!frames.length) return audioBytes;
+
+  const frameBytes = concatUint8Arrays(frames);
+  const header = concatUint8Arrays([
+    new TextEncoder().encode('ID3'),
+    new Uint8Array([0x03, 0x00, 0x00]),
+    new Uint8Array(syncsafe(frameBytes.length)),
+  ]);
+
+  return concatUint8Arrays([header, frameBytes, stripExistingId3(audioBytes)]);
+}
+
+async function getBestCoverUrl(song) {
+  if (!['kw', 'kg'].includes(song.source)) {
+    return song.img && /^https?:\/\//i.test(song.img) ? song.img : '';
+  }
+
+  try {
+    const params = new URLSearchParams({
+      source: song.source,
+      songmid: song.songmid || '',
+      albumId: song.albumId || '',
+      hash: song.hash || '',
+      name: song.name || '',
+      singer: song.singer || '',
+    });
+    const res = await fetch(`/api/pic?${params.toString()}`, { cache: 'force-cache' });
+    if (!res.ok) return '';
+    const data = await res.json();
+    if (data.img && /^https?:\/\//i.test(data.img)) {
+      song.img = data.img;
+      return data.img;
+    }
+  } catch (err) {
+    console.warn('[Download] cover lookup failed:', err.message);
+  }
+  return song.img && /^https?:\/\//i.test(song.img) ? song.img : '';
 }
 
 async function getOrLoadSandbox(url) {
@@ -802,12 +1059,13 @@ function appendSearchResults(songs) {
     item.className = 'song-item';
     item.id = `song-item-${globalIdx}`;
 
-    const isKuwo = song.source === 'kw';
+    const shouldLazyLoadCover = ['kw', 'kg'].includes(song.source) && !song.img;
+    const coverUrl = getImageProxyUrl(song.img);
 
     item.innerHTML = `
       <div class="song-cover-wrapper">
         <div class="song-cover-placeholder">♪</div>
-        <img class="song-cover" src="${song.img || ''}" alt="Cover" style="${song.img ? 'display:block;' : 'display:none;'}">
+        <img class="song-cover" src="${coverUrl}" alt="Cover" style="${coverUrl ? 'display:block;' : 'display:none;'}">
       </div>
       <div class="song-info">
         <div class="song-title">${escapeHtml(song.name)}</div>
@@ -837,29 +1095,30 @@ function appendSearchResults(songs) {
 
     el.songList.appendChild(item);
 
-    // If Kuwo, lazy load cover image
-    if (isKuwo && !song.img) {
-      lazyLoadKuwoCover(song.songmid, item.querySelector('.song-cover'), item.querySelector('.song-cover-placeholder'), globalIdx);
+    if (shouldLazyLoadCover) {
+      lazyLoadCover(song, item.querySelector('.song-cover'), item.querySelector('.song-cover-placeholder'), globalIdx);
     }
   });
 }
 
-// Lazy Load Kuwo Covers
-async function lazyLoadKuwoCover(songmid, imgEl, placeholderEl, idx) {
+async function lazyLoadCover(song, imgEl, placeholderEl, idx) {
   try {
-    const coverQueryUrl = `http://artistpicserver.kuwo.cn/pic.web?corp=kuwo&type=rid_pic&pictype=500&size=500&rid=${songmid}`;
-    const res = await fetch('/api/proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: coverQueryUrl, method: 'GET' }),
+    const params = new URLSearchParams({
+      source: song.source,
+      songmid: song.songmid || '',
+      albumId: song.albumId || '',
+      hash: song.hash || '',
+      name: song.name || '',
+      singer: song.singer || '',
     });
+    const res = await fetch(`/api/pic?${params.toString()}`, { cache: 'force-cache' });
     if (!res.ok) return;
-    const bodyText = await res.text();
-    if (bodyText && bodyText.startsWith('http')) {
-      imgEl.src = bodyText;
+    const data = await res.json();
+    if (data.img && /^https?:\/\//i.test(data.img)) {
+      imgEl.src = getImageProxyUrl(data.img);
       imgEl.style.display = 'block';
       placeholderEl.style.display = 'none';
-      state.currentResults[idx].img = bodyText;
+      state.currentResults[idx].img = data.img;
     }
   } catch (err) {
     // Fail silently
@@ -897,8 +1156,9 @@ function openDownloadModal(song) {
 }
 
 async function startDownloadTask(song, quality) {
-  const defaultExt = quality.startsWith('flac') ? 'flac' : 'mp3';
-  const displayFilename = `${song.singer} - ${song.name} [${quality.toUpperCase()}].${defaultExt}`;
+  const selectedQuality = normalizeQualityType(quality) || quality;
+  const defaultExt = getDefaultExtensionForQuality(selectedQuality);
+  const displayFilename = `${song.singer} - ${song.name} [${formatQualityLabel(selectedQuality)}].${defaultExt}`;
   const taskId = Date.now().toString();
 
   // Create UI list item
@@ -946,22 +1206,13 @@ async function startDownloadTask(song, quality) {
     const contentLengthHeader = response.headers.get('X-Content-Length') || response.headers.get('Content-Length');
     const contentLength = parseInt(contentLengthHeader || '0', 10);
     
-    // Determine dynamic extension based on actual response content-type
-    let actualExt = defaultExt;
-    if (quality.startsWith('flac')) {
-      if (contentType.includes('mpeg') || contentType.includes('mp3')) actualExt = 'mp3';
-      else if (contentType.includes('m4a') || contentType.includes('mp4') || contentType.includes('aac')) actualExt = 'm4a';
-      else actualExt = 'flac';
-    } else {
-      if (contentType.includes('flac')) actualExt = 'flac';
-      else if (contentType.includes('mpeg') || contentType.includes('mp3')) actualExt = 'mp3';
-      else if (contentType.includes('ogg')) actualExt = 'ogg';
-      else if (contentType.includes('wav')) actualExt = 'wav';
-      else if (contentType.includes('m4a') || contentType.includes('mp4') || contentType.includes('aac')) actualExt = 'm4a';
-    }
+    const resolverQuality = normalizeQualityType(resolution.resolvedQuality);
+    const actualExt = getExtensionFromMedia(contentType, getDefaultExtensionForQuality(resolverQuality || selectedQuality), resolution.audioUrl);
+    const actualQuality = getActualQuality(selectedQuality, resolverQuality, actualExt);
+    const isQualityChanged = Boolean(actualQuality) && actualQuality !== selectedQuality;
 
     // Build the finalized file name
-    const finalFilename = `${song.singer} - ${song.name} [${quality.toUpperCase()}].${actualExt}`;
+    const finalFilename = `${song.singer} - ${song.name} [${formatQualityLabel(actualQuality || selectedQuality)}].${actualExt}`;
     const nameEl = taskEl.querySelector('.queue-name');
     if (nameEl) {
       nameEl.innerText = finalFilename;
@@ -1003,19 +1254,20 @@ async function startDownloadTask(song, quality) {
       throw new Error(`下载中断，仅接收了 ${formatBytes(receivedLength)} / ${formatBytes(contentLength)}`);
     }
 
-    // Detect if quality was downgraded by the source server
     let qualityWarnText = '';
-    let isDowngraded = false;
-    const isClearlyLossy = /mpeg|mp3|mp4|m4a|aac/i.test(contentType);
-    if (quality.startsWith('flac') && isClearlyLossy) {
-      qualityWarnText = ' (已降级为高品质MP3)';
-      isDowngraded = true;
+    if (isQualityChanged) {
+      qualityWarnText = ` (实际下载为 ${formatQualityLabel(actualQuality)})`;
     }
 
-    statusText.innerText = '正在写入本地磁盘...';
+    statusText.innerText = actualExt === 'mp3' ? '正在写入封面与歌曲信息...' : '正在写入本地磁盘...';
     statusText.className = 'queue-status completed';
-    
-    const blob = new Blob(chunks, { type: contentType || 'application/octet-stream' });
+
+    let fileBytes = concatUint8Arrays(chunks);
+    if (actualExt === 'mp3') {
+      fileBytes = await embedMp3Metadata(fileBytes, resolvedSong);
+    }
+
+    const blob = new Blob([fileBytes], { type: contentType || 'application/octet-stream' });
     const blobUrl = URL.createObjectURL(blob);
     
     const a = document.createElement('a');
@@ -1033,8 +1285,8 @@ async function startDownloadTask(song, quality) {
     pctText.innerText = '100%';
     updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
     
-    if (isDowngraded) {
-      showToast(`下载成功: ${song.name} (已自动降级为高品质MP3，源无损接口限制)`, 'warning');
+    if (isQualityChanged) {
+      showToast(`下载成功: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
     } else if (usedFallback) {
       showToast(`下载成功: ${song.name} (已自动切换到${getPlatformName(resolvedSong.source)})`, 'success');
     } else {
