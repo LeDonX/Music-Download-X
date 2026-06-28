@@ -22,6 +22,64 @@
   margin: 0;
   padding: 0;
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+a,
+input,
+textarea,
+select,
+[role="button"],
+.custom-select,
+.custom-select-trigger,
+.custom-option,
+.song-btn,
+.quality-btn,
+.search-btn,
+.page-btn,
+.preset-btn,
+.save-script-btn,
+.modal-close-btn,
+.download-progress-wrapper {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+[role="button"],
+.custom-select,
+.custom-select-trigger,
+.custom-option,
+.song-btn,
+.quality-btn,
+.search-btn,
+.page-btn,
+.preset-btn,
+.save-script-btn,
+.modal-close-btn,
+.download-progress-wrapper {
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+button:focus,
+button:focus-visible,
+a:focus,
+a:focus-visible,
+input:focus,
+textarea:focus,
+select:focus,
+.custom-select-trigger:focus,
+.custom-option:focus,
+.song-btn:focus,
+.quality-btn:focus,
+.search-btn:focus,
+.page-btn:focus,
+.preset-btn:focus,
+.save-script-btn:focus,
+.modal-close-btn:focus {
+  outline: none;
 }
 
 body {
@@ -153,8 +211,10 @@ body {
   transition: all 0.3s ease;
 }
 
-.glass-panel:hover {
-  border-color: #cbd5e1;
+@media (hover: hover) {
+  .glass-panel:hover {
+    border-color: #cbd5e1;
+  }
 }
 
 /* Search Header */
@@ -177,10 +237,13 @@ body {
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.search-header-card:hover, .search-header-card:focus-within {
-  box-shadow: 0 16px 48px rgba(16, 185, 129, 0.1), 0 6px 20px rgba(0, 0, 0, 0.04) !important;
-  border-color: rgba(255, 255, 255, 0.95) !important;
-  background: rgba(255, 255, 255, 0.55) !important;
+@media (hover: hover) {
+  .search-header-card:hover,
+  .search-header-card:focus-within {
+    box-shadow: 0 16px 48px rgba(16, 185, 129, 0.1), 0 6px 20px rgba(0, 0, 0, 0.04) !important;
+    border-color: rgba(255, 255, 255, 0.95) !important;
+    background: rgba(255, 255, 255, 0.55) !important;
+  }
 }
 
 .search-bar-inner {
@@ -220,8 +283,10 @@ body {
   touch-action: manipulation;
 }
 
-.custom-select-trigger:hover {
-  background-color: #f8fafc;
+@media (hover: hover) {
+  .custom-select-trigger:hover {
+    background-color: #f8fafc;
+  }
 }
 
 .select-arrow {
@@ -278,9 +343,11 @@ body {
   touch-action: manipulation;
 }
 
-.custom-option:hover {
-  background-color: #f1f5f9;
-  color: var(--text-primary);
+@media (hover: hover) {
+  .custom-option:hover {
+    background-color: #f1f5f9;
+    color: var(--text-primary);
+  }
 }
 
 .custom-option.active {
@@ -376,9 +443,11 @@ body {
   transition: all 0.2s ease;
 }
 
-.song-item:hover {
-  background: #f1f5f9;
-  border-color: var(--card-border);
+@media (hover: hover) {
+  .song-item:hover {
+    background: #f1f5f9;
+    border-color: var(--card-border);
+  }
 }
 
 .song-cover-wrapper {
@@ -466,16 +535,18 @@ body {
   transition: all 0.2s ease;
 }
 
-.song-btn:hover {
-  background: var(--primary-accent);
-  color: white;
-  border-color: transparent;
-  box-shadow: var(--accent-glow);
-  transform: scale(1.05);
-}
+@media (hover: hover) {
+  .song-btn:hover {
+    background: var(--primary-accent);
+    color: white;
+    border-color: transparent;
+    box-shadow: var(--accent-glow);
+    transform: scale(1.05);
+  }
 
-.song-btn:active {
-  transform: scale(0.95);
+  .song-btn:active {
+    transform: scale(0.95);
+  }
 }
 
 /* Pagination Controls */
@@ -501,10 +572,12 @@ body {
   transition: all 0.2s ease;
 }
 
-.page-btn:hover:not(:disabled) {
-  background: var(--bg-light);
-  color: var(--text-primary);
-  border-color: #cbd5e1;
+@media (hover: hover) {
+  .page-btn:hover:not(:disabled) {
+    background: var(--bg-light);
+    color: var(--text-primary);
+    border-color: #cbd5e1;
+  }
 }
 
 .page-btn:disabled {
@@ -594,19 +667,21 @@ body {
   transition: all 0.2s ease;
 }
 
-.quality-btn:hover {
-  background: #f1f5f9;
-  border-color: #cbd5e1;
-}
-
 .quality-btn.highest {
   border-color: #a7f3d0;
   background: #ecfdf5;
 }
 
-.quality-btn.highest:hover {
-  background: #d1fae5;
-  border-color: #6ee7b7;
+@media (hover: hover) {
+  .quality-btn:hover {
+    background: #f1f5f9;
+    border-color: #cbd5e1;
+  }
+
+  .quality-btn.highest:hover {
+    background: #d1fae5;
+    border-color: #6ee7b7;
+  }
 }
 
 .quality-label {
@@ -650,9 +725,11 @@ body {
   transition: all 0.2s ease;
 }
 
-.modal-close-btn:hover {
-  background: var(--bg-light);
-  color: var(--text-primary);
+@media (hover: hover) {
+  .modal-close-btn:hover {
+    background: var(--bg-light);
+    color: var(--text-primary);
+  }
 }
 
 /* Empty States & Status Messages */
@@ -727,6 +804,65 @@ body {
   border-color: transparent !important;
   box-shadow: none !important;
   transform: none !important;
+}
+
+@media (hover: none) {
+  .custom-select-trigger:active,
+  .custom-option:active,
+  .search-btn:active,
+  .song-btn:active,
+  .quality-btn:active,
+  .page-btn:active,
+  .preset-btn:active,
+  .save-script-btn:active,
+  .modal-close-btn:active,
+  .download-progress-wrapper:active {
+    -webkit-tap-highlight-color: transparent;
+    box-shadow: none;
+    filter: none;
+  }
+
+  .custom-select-trigger:active {
+    background-color: #ffffff;
+  }
+
+  .custom-option:active {
+    background-color: transparent;
+    color: var(--text-secondary);
+  }
+
+  .custom-option.active:active {
+    background-color: #d1fae5;
+    color: #047857;
+  }
+
+  .search-btn:active {
+    background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+    color: white;
+    transform: none;
+  }
+
+  .song-btn:active {
+    background: var(--card-bg);
+    color: var(--text-secondary);
+    border-color: var(--card-border);
+    transform: none;
+  }
+
+  .quality-btn:active {
+    background: var(--bg-light);
+    border-color: var(--card-border);
+  }
+
+  .quality-btn.highest:active {
+    background: #ecfdf5;
+    border-color: #a7f3d0;
+  }
+
+  .modal-close-btn:active {
+    background: transparent;
+    color: var(--text-secondary);
+  }
 }
 
 /* Responsive Adaptation (Especially Mobile Ports) */
