@@ -46,6 +46,8 @@ path,
 .save-script-btn,
 .modal-close-btn,
 .wechat-download-btn,
+.download-page-btn,
+.download-page-link-btn,
 .download-progress-wrapper {
   -webkit-tap-highlight-color: transparent;
 }
@@ -78,6 +80,8 @@ button,
 .save-script-btn,
 .modal-close-btn,
 .wechat-download-btn,
+.download-page-btn,
+.download-page-link-btn,
 .download-progress-wrapper {
   user-select: none;
   -webkit-user-select: none;
@@ -97,6 +101,8 @@ button *,
 .save-script-btn *,
 .modal-close-btn *,
 .wechat-download-btn *,
+.download-page-btn *,
+.download-page-link-btn *,
 .download-progress-wrapper * {
   pointer-events: none;
   user-select: none;
@@ -130,7 +136,9 @@ select:focus,
 .preset-btn:focus,
 .save-script-btn:focus,
 .modal-close-btn:focus,
-.wechat-download-btn:focus {
+.wechat-download-btn:focus,
+.download-page-btn:focus,
+.download-page-link-btn:focus {
   outline: none;
 }
 
@@ -148,6 +156,89 @@ body {
   position: relative;
   display: flex;
   justify-content: center;
+}
+
+.download-page-body {
+  min-height: 100vh;
+  align-items: center;
+  padding: 24px 16px;
+}
+
+.download-page {
+  width: 100%;
+  max-width: 420px;
+}
+
+.download-page-card {
+  width: 100%;
+  padding: 26px 22px;
+  text-align: center;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 18px;
+  box-shadow: 0 20px 30px rgba(15, 23, 42, 0.08);
+}
+
+.download-page-icon {
+  width: 54px;
+  height: 54px;
+  margin: 0 auto 14px;
+  border-radius: 16px;
+  background: #ecfdf5;
+  color: var(--primary-accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.download-page-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+}
+
+.download-page-filename {
+  font-size: 0.92rem;
+  color: var(--text-secondary);
+  margin-bottom: 18px;
+  overflow-wrap: anywhere;
+}
+
+.download-page-btn,
+.download-page-link-btn {
+  width: 100%;
+  min-height: 44px;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.download-page-btn {
+  border: none;
+  background: var(--primary-accent);
+  color: var(--text-light);
+}
+
+.download-page-link-btn {
+  margin-top: 10px;
+  border: 1px solid var(--card-border);
+  background: var(--bg-light);
+  color: var(--text-primary);
+}
+
+.download-page-btn:disabled,
+.download-page-link-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.download-page-hint {
+  margin-top: 14px;
+  font-size: 0.86rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
 }
 
 /* Remove liquid animated background layers visually */
@@ -976,6 +1067,8 @@ body {
   .save-script-btn,
   .modal-close-btn,
   .wechat-download-btn,
+  .download-page-btn,
+  .download-page-link-btn,
   .download-progress-wrapper {
     -webkit-tap-highlight-color: rgba(0, 0, 0, 0) !important;
     -webkit-touch-callout: none;
@@ -1003,6 +1096,10 @@ body {
   .modal-close-btn:focus,
   .wechat-download-btn:active,
   .wechat-download-btn:focus,
+  .download-page-btn:active,
+  .download-page-btn:focus,
+  .download-page-link-btn:active,
+  .download-page-link-btn:focus,
   .download-progress-wrapper:active {
     -webkit-tap-highlight-color: transparent;
     box-shadow: none;

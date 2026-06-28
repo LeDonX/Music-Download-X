@@ -277,6 +277,15 @@ function toAbsoluteUrl(url) {
   return new URL(url, window.location.href).toString();
 }
 
+function buildDownloadPageUrl(downloadUrl, filename) {
+  const pageUrl = new URL('/download.html', window.location.href);
+  pageUrl.hash = new URLSearchParams({
+    url: toAbsoluteUrl(downloadUrl),
+    filename: filename || 'music',
+  }).toString();
+  return pageUrl.toString();
+}
+
 async function copyTextToClipboard(text) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -301,6 +310,7 @@ function closeWeChatDownloadModal() {
 }
 
 function showWeChatDownloadModal(downloadUrl, filename) {
+  const pageUrl = buildDownloadPageUrl(downloadUrl, filename);
   const absoluteUrl = toAbsoluteUrl(downloadUrl);
   closeWeChatDownloadModal();
 
@@ -311,11 +321,12 @@ function showWeChatDownloadModal(downloadUrl, filename) {
     <div class="glass-panel modal-content wechat-download-content">
       <h3 class="modal-title">微信内无法直接下载</h3>
       <div class="modal-song-name" title="${escapeHtml(filename)}">${escapeHtml(filename)}</div>
-      <p class="wechat-download-tip">请点击右上角菜单选择在浏览器打开，或复制链接到系统浏览器下载。</p>
+      <p class="wechat-download-tip">请复制下载页链接到系统浏览器打开，下载页会保留明确的开始下载提示。</p>
       <div class="wechat-download-actions">
-        <button class="wechat-download-btn primary" type="button" data-action="copy">复制下载链接</button>
-        <button class="wechat-download-btn" type="button" data-action="open">尝试打开链接</button>
+        <button class="wechat-download-btn primary" type="button" data-action="copy-page">复制下载页链接</button>
+        <button class="wechat-download-btn" type="button" data-action="open-page">尝试打开下载页</button>
       </div>
+      <button class="wechat-download-btn direct" type="button" data-action="copy-direct">复制直链</button>
       <button class="modal-close-btn" type="button" data-action="close">关闭</button>
     </div>
   `;
@@ -326,22 +337,31 @@ function showWeChatDownloadModal(downloadUrl, filename) {
       closeWeChatDownloadModal();
       return;
     }
-    if (action === 'copy') {
+    if (action === 'copy-page') {
       try {
-        await copyTextToClipboard(absoluteUrl);
-        showToast('下载链接已复制，请在系统浏览器打开', 'success');
+        await copyTextToClipboard(pageUrl);
+        showToast('下载页链接已复制，请在系统浏览器打开', 'success');
       } catch (err) {
         showToast('复制失败，请使用右上角在浏览器打开', 'error');
       }
       return;
     }
-    if (action === 'open') {
-      window.location.href = absoluteUrl;
+    if (action === 'copy-direct') {
+      try {
+        await copyTextToClipboard(absoluteUrl);
+        showToast('下载直链已复制', 'success');
+      } catch (err) {
+        showToast('复制失败，请使用右上角在浏览器打开', 'error');
+      }
+      return;
+    }
+    if (action === 'open-page') {
+      window.location.href = pageUrl;
     }
   });
 
   document.body.appendChild(overlay);
-  return absoluteUrl;
+  return pageUrl;
 }
 
 function buildPicParams(song) {
