@@ -291,60 +291,81 @@ function enqueueBytes(controller, bytes) {
   if (bytes?.length) controller.enqueue(bytes);
 }
 
-function streamMp3WithId3(sourceStream, id3Tag) {
+function createFixedLengthBody(body, expectedLength) {
+  if (!body || !expectedLength || typeof FixedLengthStream !== 'function') {
+    return null;
+  }
+
+  const fixedStream = new FixedLengthStream(expectedLength);
+  body.pipeTo(fixedStream.writable).catch((err) => {
+    console.error('[Download Proxy] fixed length stream failed:', err);
+  });
+  return fixedStream.readable;
+}
+
+async function prepareMp3StreamWithId3(sourceStream, id3Tag) {
   const reader = sourceStream.getReader();
-  return new ReadableStream({
-    async start(controller) {
-      const chunks = [];
-      let total = 0;
+  const chunks = [];
+  let total = 0;
+  let stripSize = 0;
 
-      try {
-        while (total < 10) {
-          const { done, value } = await reader.read();
-          if (done) {
+  while (total < 10) {
+    const { done, value } = await reader.read();
+    if (done) {
+      const buffered = concatUint8Arrays(chunks);
+      return {
+        body: new ReadableStream({
+          start(controller) {
             enqueueBytes(controller, id3Tag);
-            enqueueBytes(controller, concatUint8Arrays(chunks));
+            enqueueBytes(controller, buffered);
             controller.close();
-            return;
-          }
-          chunks.push(value);
-          total += value.length;
-        }
+          },
+        }),
+        removedBytes: 0,
+      };
+    }
+    chunks.push(value);
+    total += value.length;
+  }
 
-        let buffered = concatUint8Arrays(chunks);
-        let stripSize = 0;
-        if (
-          buffered[0] === 0x49 &&
-          buffered[1] === 0x44 &&
-          buffered[2] === 0x33
-        ) {
-          stripSize = 10 + ((buffered[6] << 21) | (buffered[7] << 14) | (buffered[8] << 7) | buffered[9]);
-          while (total < stripSize) {
+  let buffered = concatUint8Arrays(chunks);
+  if (
+    buffered[0] === 0x49 &&
+    buffered[1] === 0x44 &&
+    buffered[2] === 0x33
+  ) {
+    stripSize = 10 + ((buffered[6] << 21) | (buffered[7] << 14) | (buffered[8] << 7) | buffered[9]);
+    while (total < stripSize) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+    buffered = concatUint8Arrays(chunks);
+  }
+
+  return {
+    body: new ReadableStream({
+      async start(controller) {
+        try {
+          enqueueBytes(controller, id3Tag);
+          enqueueBytes(controller, buffered.slice(stripSize));
+          while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            chunks.push(value);
-            total += value.length;
+            enqueueBytes(controller, value);
           }
-          buffered = concatUint8Arrays(chunks);
+          controller.close();
+        } catch (err) {
+          controller.error(err);
         }
-
-        enqueueBytes(controller, id3Tag);
-        enqueueBytes(controller, buffered.slice(stripSize));
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          enqueueBytes(controller, value);
-        }
-        controller.close();
-      } catch (err) {
-        controller.error(err);
-      }
-    },
-    cancel(reason) {
-      return reader.cancel(reason);
-    },
-  });
+      },
+      cancel(reason) {
+        return reader.cancel(reason);
+      },
+    }),
+    removedBytes: Math.min(stripSize, buffered.length),
+  };
 }
 
 function streamFlacWithPicture(sourceStream, pictureBlock) {
@@ -520,9 +541,10 @@ async function handleDownload(url, filename, headers, meta = {}) {
       const cover = await coverPromise;
       const id3Tag = createId3Tag(meta, cover);
       if (id3Tag) {
-        body = streamMp3WithId3(body, id3Tag);
+        const prepared = await prepareMp3StreamWithId3(body, id3Tag);
+        body = prepared.body;
         transformed = true;
-        if (expectedLength > 0) expectedLength += id3Tag.length;
+        if (expectedLength > 0) expectedLength += id3Tag.length - prepared.removedBytes;
       }
     } else if (body && ext === 'flac') {
       const cover = await coverPromise;
@@ -534,10 +556,8 @@ async function handleDownload(url, filename, headers, meta = {}) {
       }
     }
 
-    if (contentLength && !transformed) {
-      responseHeaders.set('Content-Length', contentLength);
-    }
     if (expectedLength > 0) {
+      responseHeaders.set('Content-Length', String(expectedLength));
       responseHeaders.set('X-Content-Length', String(expectedLength));
     }
     responseHeaders.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename || 'music.mp3')}`);
@@ -546,7 +566,9 @@ async function handleDownload(url, filename, headers, meta = {}) {
     responseHeaders.set('Access-Control-Allow-Headers', '*');
     responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, X-Content-Length');
 
-    return new Response(body, {
+    const fixedLengthBody = createFixedLengthBody(body, expectedLength);
+
+    return new Response(fixedLengthBody || body, {
       status: 200,
       headers: responseHeaders,
     });
