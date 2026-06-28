@@ -31,10 +31,21 @@ function addQuality(types, _types, type, size, extra = {}) {
   if (size == null || size === '') return;
   if (typeof size === 'number' && size <= 0) return;
   if (typeof size === 'string' && size.trim() === '0') return;
-  const sizeText = typeof size === 'string' ? size : sizeFormat(size);
+  const cleanSize = typeof size === 'string' ? size.trim() : size;
+  const sizeText = typeof cleanSize === 'string'
+    ? (/^\d+$/.test(cleanSize) ? sizeFormat(Number(cleanSize)) || cleanSize : cleanSize)
+    : sizeFormat(cleanSize);
   if (!sizeText) return;
   types.push({ type, size: sizeText, ...extra });
   _types[type] = { size: sizeText, ...extra };
+}
+
+function formatSingerName(list, key = 'name') {
+  if (!Array.isArray(list)) return '';
+  return list
+    .map(item => typeof item === 'string' ? item : item?.[key])
+    .filter(Boolean)
+    .join('\u3001');
 }
 
 function createSearchResponse(payload, headers) {
@@ -87,6 +98,84 @@ async function zzcSign(text) {
   const b64Part = base64Encode(part3);
   return `zzc${part1}${b64Part}${part2}`.toLowerCase();
 }
+
+function md5(input) {
+  const bytes = new TextEncoder().encode(input);
+  const bitLen = bytes.length * 8;
+  const paddedLen = (((bytes.length + 8) >> 6) + 1) << 6;
+  const padded = new Uint8Array(paddedLen);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLen - 8, bitLen >>> 0, true);
+  view.setUint32(paddedLen - 4, Math.floor(bitLen / 0x100000000), true);
+
+  let a0 = 0x67452301;
+  let b0 = 0xefcdab89;
+  let c0 = 0x98badcfe;
+  let d0 = 0x10325476;
+  const shifts = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+  ];
+  const constants = Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0);
+
+  for (let offset = 0; offset < paddedLen; offset += 64) {
+    let a = a0;
+    let b = b0;
+    let c = c0;
+    let d = d0;
+
+    for (let i = 0; i < 64; i++) {
+      let f;
+      let g;
+      if (i < 16) {
+        f = (b & c) | (~b & d);
+        g = i;
+      } else if (i < 32) {
+        f = (d & b) | (~d & c);
+        g = (5 * i + 1) % 16;
+      } else if (i < 48) {
+        f = b ^ c ^ d;
+        g = (3 * i + 5) % 16;
+      } else {
+        f = c ^ (b | ~d);
+        g = (7 * i) % 16;
+      }
+
+      const word = view.getUint32(offset + g * 4, true);
+      const sum = (a + f + constants[i] + word) >>> 0;
+      const rotated = ((sum << shifts[i]) | (sum >>> (32 - shifts[i]))) >>> 0;
+      a = d;
+      d = c;
+      c = b;
+      b = (b + rotated) >>> 0;
+    }
+
+    a0 = (a0 + a) >>> 0;
+    b0 = (b0 + b) >>> 0;
+    c0 = (c0 + c) >>> 0;
+    d0 = (d0 + d) >>> 0;
+  }
+
+  const output = new Uint8Array(16);
+  const outputView = new DataView(output.buffer);
+  outputView.setUint32(0, a0, true);
+  outputView.setUint32(4, b0, true);
+  outputView.setUint32(8, c0, true);
+  outputView.setUint32(12, d0, true);
+  return Array.from(output).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function createMiguSignature(time, keyword) {
+  const deviceId = '963B7AA0D21511ED807EE5846EC87D20';
+  const signatureMd5 = '6cdc72a439cef99a3418d2a78aa28c73';
+  const sign = md5(`${keyword}${signatureMd5}yyapp2d16148780a1dcc7408e06336b98cfd50${deviceId}${time}`);
+  return { sign, deviceId };
+}
+
 export async function onRequestGet(context) {
   const { searchParams } = new URL(context.request.url);
   const keyword = searchParams.get("keyword") || "";
@@ -120,14 +209,15 @@ export async function onRequestGet(context) {
       const rawList = json.result?.songs || [];
       const total = json.result?.songCount || 0;
       const list = rawList.map((song) => {
+        const songmid = song.id.toString();
         const types = [];
         const _types = {};
-        addQuality(types, _types, "128k", song.l?.size || 1.2 * 1024 * 1024);
-        addQuality(types, _types, "320k", song.h?.size);
-        addQuality(types, _types, "flac", song.sq?.size);
-        addQuality(types, _types, "flac24bit", song.hr?.size);
+        addQuality(types, _types, "128k", song.l?.size || 1.2 * 1024 * 1024, { hash: songmid });
+        addQuality(types, _types, "320k", song.h?.size, { hash: songmid });
+        addQuality(types, _types, "flac", song.sq?.size, { hash: songmid });
+        addQuality(types, _types, "flac24bit", song.hr?.size, { hash: songmid });
         return {
-          songmid: song.id.toString(),
+          songmid,
           name: song.name,
           singer: (song.ar || []).map((a) => a.name).join("\u3001"),
           albumName: song.al?.name || "",
@@ -216,14 +306,15 @@ export async function onRequestGet(context) {
       const list = rawList.filter(item => item.file?.media_mid).map((item) => {
         const albummid = item.album?.mid || "";
         const file = item.file || {};
+        const songmid = item.mid || "";
         const types = [];
         const _types = {};
-        addQuality(types, _types, "128k", file.size_128mp3 || 1.2 * 1024 * 1024);
-        addQuality(types, _types, "320k", file.size_320mp3);
-        addQuality(types, _types, "flac", file.size_flac);
-        addQuality(types, _types, "flac24bit", file.size_hires);
+        addQuality(types, _types, "128k", file.size_128mp3 || 1.2 * 1024 * 1024, { hash: songmid });
+        addQuality(types, _types, "320k", file.size_320mp3, { hash: songmid });
+        addQuality(types, _types, "flac", file.size_flac, { hash: songmid });
+        addQuality(types, _types, "flac24bit", file.size_hires, { hash: songmid });
         return {
-          songmid: item.mid || "",
+          songmid,
           name: item.title || "",
           singer: (item.singer || []).map((s) => s.name).join("\u3001"),
           albumName: item.album?.name || "",
@@ -267,25 +358,25 @@ export async function onRequestGet(context) {
           if (!match) continue;
           switch (match[2]) {
             case "4000":
-              addQuality(types, _types, "flac24bit", match[4]);
+              addQuality(types, _types, "flac24bit", match[4], { hash: rid });
               break;
             case "2000":
-              addQuality(types, _types, "flac", match[4]);
+              addQuality(types, _types, "flac", match[4], { hash: rid });
               break;
             case "320":
-              addQuality(types, _types, "320k", match[4]);
+              addQuality(types, _types, "320k", match[4], { hash: rid });
               break;
             case "128":
-              addQuality(types, _types, "128k", match[4]);
+              addQuality(types, _types, "128k", match[4], { hash: rid });
               break;
           }
         }
         if (!types.length) {
           const formats = item.FORMATS || "";
-          addQuality(types, _types, "128k", "1.2M");
-          if (formats.includes("MP3320") || formats.includes("320")) addQuality(types, _types, "320k", "3.0M");
-          if (formats.includes("FLAC") || formats.includes("ape")) addQuality(types, _types, "flac", "10M");
-          if (formats.includes("HIRES")) addQuality(types, _types, "flac24bit", "25M");
+          addQuality(types, _types, "128k", "1.2M", { hash: rid });
+          if (formats.includes("MP3320") || formats.includes("320")) addQuality(types, _types, "320k", "3.0M", { hash: rid });
+          if (formats.includes("FLAC") || formats.includes("ape")) addQuality(types, _types, "flac", "10M", { hash: rid });
+          if (formats.includes("HIRES")) addQuality(types, _types, "flac24bit", "25M", { hash: rid });
         }
         return {
           songmid: rid,
@@ -340,57 +431,80 @@ export async function onRequestGet(context) {
       });
       return createSearchResponse({ list, total, page, limit, allPage: Math.ceil(total / limit), source: "kg" }, responseHeaders);
     } else if (source === "mg") {
-      const url = `https://app.c.nf.migu.cn/MIGUM2.0/v1.0/content/search_all.do?isCopyright=1&isCorrect=1&pageNo=${page}&pageSize=${limit}&searchSwitch=%7B%22song%22:1%7D&text=${encodeURIComponent(keyword)}`;
+      const time = Date.now().toString();
+      const signData = createMiguSignature(time, keyword);
+      const url = `https://jadeite.migu.cn/music_search/v3/search/searchAll?isCorrect=0&isCopyright=1&searchSwitch=%7B%22song%22%3A1%2C%22album%22%3A0%2C%22singer%22%3A0%2C%22tagSong%22%3A1%2C%22mvSong%22%3A0%2C%22bestShow%22%3A1%2C%22songlist%22%3A0%2C%22lyricSong%22%3A0%7D&pageSize=${limit}&text=${encodeURIComponent(keyword)}&pageNo=${page}&sort=0&sid=USS`;
       const json = await retry(async () => {
         const res = await fetch(url, {
           headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://m.music.migu.cn/"
+            "uiVersion": "A_music_3.6.1",
+            "deviceId": signData.deviceId,
+            "timestamp": time,
+            "sign": signData.sign,
+            "channel": "0146921",
+            "User-Agent": "Mozilla/5.0 (Linux; U; Android 11.0.0; zh-cn; MI 11 Build/OPR1.170623.032) AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30"
           }
         });
         if (!res.ok) throw new Error(`Migu search HTTP ${res.status}`);
         const body = await res.json();
-        return body?.songResultData ? body : null;
+        return body?.code === "000000" && body?.songResultData ? body : null;
       });
-      const rawList = (json.songResultData?.result || []).slice(0, limit);
+      const rawList = json.songResultData?.resultList || [];
       const total = parseInt(json.songResultData?.totalCount || "0", 10);
-      const list = rawList.map((item) => {
-        const types = [];
-        const _types = {};
-        addQuality(types, _types, "128k", "1.2M");
-        const newFormats = item.newRateFormats || [];
-        newFormats.forEach((fmt) => {
-          const size = fmt.size || fmt.androidSize || "";
-          if (fmt.formatType === "HQ") {
-            addQuality(types, _types, "320k", size || "3.0M");
-          } else if (fmt.formatType === "SQ") {
-            addQuality(types, _types, "flac", size || "10M");
-          } else if (fmt.formatType === "ZQ") {
-            addQuality(types, _types, "flac24bit", size || "25M");
+      const ids = new Set();
+      const list = [];
+      rawList.forEach((group) => {
+        if (!Array.isArray(group)) return;
+        group.forEach((item) => {
+          if (!item.songId || !item.copyrightId || ids.has(item.copyrightId)) return;
+          ids.add(item.copyrightId);
+
+          const songmid = item.songId;
+          const copyrightId = item.copyrightId;
+          const types = [];
+          const _types = {};
+          (item.audioFormats || []).forEach((fmt) => {
+            const size = fmt.asize || fmt.isize || "";
+            switch (fmt.formatType) {
+              case "PQ":
+                addQuality(types, _types, "128k", size || "1.2M", { hash: copyrightId });
+                break;
+              case "HQ":
+                addQuality(types, _types, "320k", size || "3.0M", { hash: copyrightId });
+                break;
+              case "SQ":
+                addQuality(types, _types, "flac", size || "10M", { hash: copyrightId });
+                break;
+              case "ZQ24":
+                addQuality(types, _types, "flac24bit", size || "25M", { hash: copyrightId });
+                break;
+            }
+          });
+          if (!types.length) {
+            addQuality(types, _types, "128k", "1.2M", { hash: copyrightId });
           }
+
+          let img = item.img3 || item.img2 || item.img1 || "";
+          if (img && !/^https?:/i.test(img)) img = `http://d.musicapp.migu.cn${img}`;
+
+          list.push({
+            songmid,
+            name: decodeHTML(item.name || ""),
+            singer: formatSingerName(item.singerList),
+            albumName: decodeHTML(item.album || ""),
+            albumId: item.albumId ? item.albumId.toString() : "",
+            img,
+            interval: formatPlayTime(item.duration || 0),
+            source: "mg",
+            copyrightId,
+            lrcUrl: item.lrcUrl || "",
+            mrcUrl: item.mrcurl || "",
+            trcUrl: item.trcUrl || "",
+            types,
+            _types,
+            typeUrl: {}
+          });
         });
-        let img = "";
-        if (item.imgItems && item.imgItems.length > 0) {
-          img = item.imgItems[0].img || "";
-        }
-        const albumInfo = item.albums && item.albums.length > 0 ? item.albums[0] : {};
-        return {
-          songmid: item.songId || item.id || "",
-          name: decodeHTML(item.name),
-          singer: (item.singers || []).map((s) => s.name).join("\u3001"),
-          albumName: decodeHTML(albumInfo.name || ""),
-          albumId: albumInfo.id ? albumInfo.id.toString() : "",
-          img,
-          interval: null,
-          source: "mg",
-          copyrightId: item.copyrightId || "",
-          lrcUrl: item.lyricUrl || item.lrcUrl || "",
-          mrcUrl: item.mrcurl || item.mrcUrl || "",
-          trcUrl: item.trcUrl || "",
-          types,
-          _types,
-          typeUrl: {}
-        };
       });
       return createSearchResponse({ list, total, page, limit, allPage: Math.ceil(total / limit), source: "mg" }, responseHeaders);
     }
