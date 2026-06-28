@@ -286,6 +286,10 @@ function buildDownloadPageUrl(downloadUrl, filename) {
   return pageUrl.toString();
 }
 
+function buildHomePageUrl() {
+  return new URL('/', window.location.href).toString();
+}
+
 async function copyTextToClipboard(text) {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -311,7 +315,7 @@ function closeWeChatDownloadModal() {
 
 function showWeChatDownloadModal(downloadUrl, filename) {
   const pageUrl = buildDownloadPageUrl(downloadUrl, filename);
-  const absoluteUrl = toAbsoluteUrl(downloadUrl);
+  const homeUrl = buildHomePageUrl();
   closeWeChatDownloadModal();
 
   const overlay = document.createElement('div');
@@ -323,10 +327,9 @@ function showWeChatDownloadModal(downloadUrl, filename) {
       <div class="modal-song-name" title="${escapeHtml(filename)}">${escapeHtml(filename)}</div>
       <p class="wechat-download-tip">请复制下载页链接到系统浏览器打开，下载页会保留明确的开始下载提示。</p>
       <div class="wechat-download-actions">
+        <button class="wechat-download-btn" type="button" data-action="copy-home">复制主页网址</button>
         <button class="wechat-download-btn primary" type="button" data-action="copy-page">复制下载页链接</button>
-        <button class="wechat-download-btn" type="button" data-action="open-page">尝试打开下载页</button>
       </div>
-      <button class="wechat-download-btn direct" type="button" data-action="copy-direct">复制直链</button>
       <button class="modal-close-btn" type="button" data-action="close">关闭</button>
     </div>
   `;
@@ -346,17 +349,14 @@ function showWeChatDownloadModal(downloadUrl, filename) {
       }
       return;
     }
-    if (action === 'copy-direct') {
+    if (action === 'copy-home') {
       try {
-        await copyTextToClipboard(absoluteUrl);
-        showToast('下载直链已复制', 'success');
+        await copyTextToClipboard(homeUrl);
+        showToast('主页网址已复制，请在系统浏览器打开', 'success');
       } catch (err) {
         showToast('复制失败，请使用右上角在浏览器打开', 'error');
       }
       return;
-    }
-    if (action === 'open-page') {
-      window.location.href = pageUrl;
     }
   });
 
