@@ -622,7 +622,11 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
       responseHeaders.set('Content-Length', String(expectedLength));
       responseHeaders.set('X-Content-Length', String(expectedLength));
     }
-    responseHeaders.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename || 'music.mp3')}`);
+    if (meta.play === '1') {
+      responseHeaders.set('Content-Disposition', 'inline');
+    } else {
+      responseHeaders.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename || 'music.mp3')}`);
+    }
     responseHeaders.set('Content-Type', originalType || 'application/octet-stream');
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('Access-Control-Allow-Headers', '*');
@@ -663,6 +667,7 @@ export async function onRequestGet(context) {
     album: searchParams.get('album') || '',
     cover: searchParams.get('cover') || '',
     ext: searchParams.get('ext') || '',
+    play: searchParams.get('play') || '',
   }, context.request.url);
 }
 

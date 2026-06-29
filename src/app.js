@@ -1172,10 +1172,32 @@ function appendSearchResults(songs) {
       <div class="song-info">
         <div class="song-title">${escapeHtml(song.name)}</div>
         <div class="song-artist">${escapeHtml(song.singer)}</div>
+        <div class="player-progress-container" style="display: none;">
+          <span class="player-current-time">00:00</span>
+          <input type="range" class="player-progress-slider" min="0" max="100" value="0">
+          <span class="player-total-time">${song.interval || '00:00'}</span>
+        </div>
+        <div class="player-lyric-container" style="display: none;">
+          <div class="player-lyric-line active"></div>
+        </div>
       </div>
       <div class="song-album">${escapeHtml(song.albumName || '未知专辑')}</div>
       <div class="song-duration">${song.interval || '00:00'}</div>
       <div class="song-actions">
+        <div class="play-progress-wrapper" data-songmid="${song.songmid}" data-source="${song.source}">
+          <svg class="progress-ring" width="36" height="36">
+            <circle class="progress-ring__track" stroke-dasharray="103.67" stroke-width="2.5" fill="transparent" r="16.5" cx="18" cy="18"/>
+            <circle class="progress-ring__circle" stroke-dasharray="103.67" stroke-width="2.5" fill="transparent" r="16.5" cx="18" cy="18"/>
+          </svg>
+          <button class="song-btn play-btn" title="播放">
+            <svg class="play-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z"/>
+            </svg>
+            <svg class="pause-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="display: none;">
+              <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+            </svg>
+          </button>
+        </div>
         <div class="download-progress-wrapper" data-songmid="${song.songmid}" data-source="${song.source}">
           <svg class="progress-ring" width="36" height="36">
             <circle class="progress-ring__track" stroke-dasharray="103.67" stroke-width="2.5" fill="transparent" r="16.5" cx="18" cy="18"/>
@@ -1195,6 +1217,73 @@ function appendSearchResults(songs) {
       if (e.currentTarget.classList.contains('downloading')) return;
       openDownloadModal(song);
     });
+
+    // Expand / Collapse card click handler
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('button') || e.target.closest('.download-progress-wrapper') || e.target.closest('.play-progress-wrapper') || e.target.closest('.player-progress-container') || e.target.closest('.player-lyric-container')) {
+        return;
+      }
+
+      document.querySelectorAll('.song-item.expanded').forEach(el => {
+        if (el !== item) {
+          el.classList.remove('expanded');
+        }
+      });
+
+      const isExpanding = !item.classList.contains('expanded');
+      item.classList.toggle('expanded');
+
+      if (isExpanding) {
+        if (activeSongId === song.songmid) {
+          activePlayBtn = item.querySelector('.play-btn');
+          activeProgressSlider = item.querySelector('.player-progress-slider');
+          activeCurrentTimeText = item.querySelector('.player-current-time');
+          activeTotalTimeText = item.querySelector('.player-total-time');
+          activeLyricContainer = item.querySelector('.player-lyric-container');
+          activeLyricLineEl = item.querySelector('.player-lyric-line');
+
+          if (!audio.paused) {
+            activePlayBtn.querySelector('.play-icon').style.display = 'none';
+            activePlayBtn.querySelector('.pause-icon').style.display = 'block';
+          } else {
+            activePlayBtn.querySelector('.play-icon').style.display = 'block';
+            activePlayBtn.querySelector('.pause-icon').style.display = 'none';
+          }
+          if (audio.duration) {
+            activeTotalTimeText.innerText = formatTime(audio.duration);
+            activeProgressSlider.value = (audio.currentTime / audio.duration) * 100 || 0;
+          }
+          triggerLyricScrollSync();
+        } else {
+          item.querySelector('.player-lyric-line').innerText = '';
+        }
+      }
+    });
+
+    // Play Button click handler
+    const playBtn = item.querySelector('.play-btn');
+    playBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      togglePlay(song, item);
+    });
+
+    // Seek range input handlers
+    const slider = item.querySelector('.player-progress-slider');
+    const currentTimeText = item.querySelector('.player-current-time');
+    slider.addEventListener('input', () => {
+      isUserSeeking = true;
+      if (audio.duration) {
+        const seekTime = (slider.value / 100) * audio.duration;
+        currentTimeText.innerText = formatTime(seekTime);
+      }
+    });
+    slider.addEventListener('change', () => {
+      if (audio.duration) {
+        audio.currentTime = (slider.value / 100) * audio.duration;
+      }
+      isUserSeeking = false;
+    });
+    slider.addEventListener('click', (e) => e.stopPropagation());
 
     el.songList.appendChild(item);
 
@@ -1440,6 +1529,309 @@ function updateDownloadProgressOnCard(songmid, source, pct, isError = false, isS
     circle.style.stroke = 'var(--primary-accent)';
     circle.style.strokeDashoffset = offset;
   });
+}
+
+// Global Audio Player Setup
+const audio = new Audio();
+let activeSongId = null;
+let loadingSongId = null;
+let activePlayBtn = null;
+let activeProgressSlider = null;
+let activeCurrentTimeText = null;
+let activeTotalTimeText = null;
+let activeLyricContainer = null;
+let activeLyricLineEl = null;
+let activeLyrics = [];
+let lastLyricIndex = -1;
+let isUserSeeking = false;
+
+audio.addEventListener('timeupdate', () => {
+  if (activeSongId && activeProgressSlider && activeCurrentTimeText && !isUserSeeking) {
+    const pct = (audio.currentTime / audio.duration) * 100 || 0;
+    activeProgressSlider.value = pct;
+    activeCurrentTimeText.innerText = formatTime(audio.currentTime);
+  }
+
+  // Sync single line lyric
+  if (activeSongId && activeLyrics.length > 0 && activeLyricLineEl) {
+    const currentTime = audio.currentTime;
+    let index = activeLyrics.findIndex((line) => line.time > currentTime);
+    if (index === -1) {
+      index = activeLyrics.length - 1;
+    } else {
+      index = Math.max(0, index - 1);
+    }
+    
+    if (index !== lastLyricIndex) {
+      lastLyricIndex = index;
+      activeLyricLineEl.innerText = activeLyrics[index].text || ' ';
+    }
+  }
+});
+
+audio.addEventListener('loadedmetadata', () => {
+  if (activeSongId && activeTotalTimeText) {
+    activeTotalTimeText.innerText = formatTime(audio.duration);
+  }
+});
+
+audio.addEventListener('playing', () => {
+  if (activePlayBtn) {
+    activePlayBtn.querySelector('.play-icon').style.display = 'none';
+    activePlayBtn.querySelector('.pause-icon').style.display = 'block';
+    const wrapper = activePlayBtn.closest('.play-progress-wrapper');
+    if (wrapper) {
+      wrapper.classList.remove('loading');
+    }
+  }
+});
+
+audio.addEventListener('pause', () => {
+  if (activePlayBtn) {
+    activePlayBtn.querySelector('.play-icon').style.display = 'block';
+    activePlayBtn.querySelector('.pause-icon').style.display = 'none';
+    const wrapper = activePlayBtn.closest('.play-progress-wrapper');
+    if (wrapper) {
+      wrapper.classList.remove('loading');
+    }
+  }
+});
+
+audio.addEventListener('ended', () => {
+  if (activePlayBtn) {
+    activePlayBtn.querySelector('.play-icon').style.display = 'block';
+    activePlayBtn.querySelector('.pause-icon').style.display = 'none';
+    const wrapper = activePlayBtn.closest('.play-progress-wrapper');
+    if (wrapper) {
+      wrapper.classList.remove('loading');
+    }
+  }
+  if (activeProgressSlider) activeProgressSlider.value = 0;
+  if (activeCurrentTimeText) activeCurrentTimeText.innerText = '00:00';
+});
+
+audio.addEventListener('error', () => {
+  if (activeSongId) {
+    console.error('[Audio Error]', audio.error);
+    showToast('播放出错，无法加载音频流', 'error');
+    resetActiveSongUI();
+  }
+});
+
+function formatTime(seconds) {
+  if (isNaN(seconds) || seconds === Infinity) return '00:00';
+  const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+  const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function triggerLyricScrollSync() {
+  lastLyricIndex = -1;
+  const e = new Event('timeupdate');
+  audio.dispatchEvent(e);
+}
+
+// Fetch lyrics from NetEase as a universal fallback, proxying via functions/api/proxy.js
+async function fetchLyrics(song) {
+  let neteaseId = null;
+  if (song.source === 'wy') {
+    neteaseId = song.songmid;
+  } else {
+    try {
+      const searchUrl = `/api/search?keyword=${encodeURIComponent(song.singer + ' ' + song.name)}&source=wy&page=1&limit=1`;
+      const res = await fetch(searchUrl);
+      if (res.ok) {
+        const data = await res.json();
+        const match = data.list?.[0];
+        if (match) {
+          neteaseId = match.songmid;
+        }
+      }
+    } catch (err) {
+      console.warn('[Lyric Search Netease failed]', err);
+    }
+  }
+
+  if (!neteaseId) {
+    if (state.sandbox) {
+      try {
+        const resolved = await state.sandbox.requestUrl(song.source, 'lyric', {
+          musicInfo: toNewMusicInfo(song),
+        });
+        const lrcText = resolved?.lyric || resolved?.data?.lyric || resolved?.lrc || resolved?.data?.lrc || '';
+        if (lrcText) return parseLrc(lrcText);
+      } catch (_) {}
+    }
+    return [];
+  }
+
+  try {
+    const lyricApiUrl = `https://music.163.com/api/song/lyric?id=${neteaseId}&lv=1&kv=1&tv=-1`;
+    const proxyRes = await fetch('/api/proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: lyricApiUrl, method: 'GET' })
+    });
+    if (!proxyRes.ok) throw new Error();
+    const data = await proxyRes.json();
+    const lyricText = data.lrc?.lyric || '';
+    if (lyricText) {
+      return parseLrc(lyricText);
+    }
+  } catch (err) {
+    console.warn('[Lyric Fetch failed]', err);
+  }
+  return [];
+}
+
+function parseLrc(lrcText) {
+  const lines = lrcText.split('\n');
+  const parsed = [];
+  const timeReg = /\[(\d+):(\d+)(?:\.(\d+))?\]/g;
+  for (const line of lines) {
+    const text = line.replace(timeReg, '').trim();
+    let match;
+    timeReg.lastIndex = 0;
+    while ((match = timeReg.exec(line)) !== null) {
+      const min = parseInt(match[1], 10);
+      const sec = parseInt(match[2], 10);
+      const ms = match[3] ? parseInt(match[3].slice(0, 3).padEnd(3, '0'), 10) : 0;
+      const time = min * 60 + sec + ms / 1000;
+      parsed.push({ time, text });
+    }
+  }
+  return parsed.sort((a, b) => a.time - b.time);
+}
+
+async function togglePlay(song, itemEl) {
+  const playWrapper = itemEl.querySelector('.play-progress-wrapper');
+  const playBtn = itemEl.querySelector('.play-btn');
+  const slider = itemEl.querySelector('.player-progress-slider');
+  const currentTimeText = itemEl.querySelector('.player-current-time');
+  const totalTimeText = itemEl.querySelector('.player-total-time');
+
+  if (activeSongId === song.songmid) {
+    if (audio.paused) {
+      try {
+        await audio.play();
+      } catch (err) {
+        showToast('播放失败: ' + err.message, 'error');
+      }
+    } else {
+      audio.pause();
+    }
+    return;
+  }
+
+  // Cancel any currently loading song
+  if (loadingSongId) {
+    const prevLoadingWrapper = document.querySelector(`.play-progress-wrapper.loading`);
+    if (prevLoadingWrapper) {
+      prevLoadingWrapper.classList.remove('loading');
+    }
+  }
+
+  // Set new loading state
+  loadingSongId = song.songmid;
+  playWrapper.classList.add('loading');
+
+  let pendingLyrics = [];
+  fetchLyrics(song).then((parsedLyrics) => {
+    if (loadingSongId === song.songmid) {
+      pendingLyrics = parsedLyrics;
+    }
+  }).catch((err) => {
+    console.error('[Lyric Fetch Error]', err);
+  });
+
+  const dummyStatusText = {
+    set innerText(val) {
+      console.log('[Play Resolution]', val);
+    }
+  };
+
+  try {
+    const displayFilename = buildSongFilename(song, 'mp3');
+    const { downloadUrl } = await createDownloadLinkWithFallback(song, '128k', displayFilename, dummyStatusText);
+    
+    if (loadingSongId !== song.songmid) return;
+    
+    // Loaded URL successfully! Stop current song and switch now
+    loadingSongId = null;
+
+    if (activeSongId) {
+      audio.pause();
+      if (activePlayBtn) {
+        activePlayBtn.querySelector('.play-icon').style.display = 'block';
+        activePlayBtn.querySelector('.pause-icon').style.display = 'none';
+        const prevWrapper = activePlayBtn.closest('.play-progress-wrapper');
+        if (prevWrapper) {
+          prevWrapper.classList.remove('loading');
+        }
+      }
+      if (activeLyricLineEl) {
+        activeLyricLineEl.innerText = '';
+      }
+    }
+
+    activeSongId = song.songmid;
+    activePlayBtn = playBtn;
+    activeProgressSlider = slider;
+    activeCurrentTimeText = currentTimeText;
+    activeTotalTimeText = totalTimeText;
+    activeLyricContainer = itemEl.querySelector('.player-lyric-container');
+    activeLyricLineEl = itemEl.querySelector('.player-lyric-line');
+    
+    activeLyrics = pendingLyrics;
+    lastLyricIndex = -1;
+
+    if (activeLyrics.length === 0) {
+      if (activeLyricLineEl) activeLyricLineEl.innerText = '暂无歌词';
+    } else {
+      triggerLyricScrollSync();
+    }
+
+    currentTimeText.innerText = '00:00';
+    slider.value = 0;
+
+    audio.src = downloadUrl + '&play=1';
+    
+    try {
+      await audio.play();
+    } catch (err) {
+      showToast('播放失败: ' + err.message, 'error');
+      resetActiveSongUI();
+    }
+  } catch (err) {
+    if (loadingSongId === song.songmid) {
+      loadingSongId = null;
+      playWrapper.classList.remove('loading');
+      showToast('解析失败: ' + err.message, 'error');
+    }
+  }
+}
+
+function resetActiveSongUI() {
+  if (activePlayBtn) {
+    activePlayBtn.querySelector('.play-icon').style.display = 'block';
+    activePlayBtn.querySelector('.pause-icon').style.display = 'none';
+    const wrapper = activePlayBtn.closest('.play-progress-wrapper');
+    if (wrapper) {
+      wrapper.classList.remove('loading');
+    }
+  }
+  if (activeLyricLineEl) {
+    activeLyricLineEl.innerText = '';
+  }
+  activeSongId = null;
+  activePlayBtn = null;
+  activeProgressSlider = null;
+  activeCurrentTimeText = null;
+  activeTotalTimeText = null;
+  activeLyricContainer = null;
+  activeLyricLineEl = null;
+  activeLyrics = [];
+  lastLyricIndex = -1;
 }
 
 // Run App
