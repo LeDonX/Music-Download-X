@@ -1081,6 +1081,9 @@ async function loadNextPage() {
   
   showBottomLoadingIndicator(true);
 
+  let success = false;
+  let isAbortError = false;
+
   try {
     const data = await fetchSearchDataWithRetry(params, requestId, controller, { retryEmpty: false });
     if (!data) return;
@@ -1094,8 +1097,13 @@ async function loadNextPage() {
       state.currentResults = [...state.currentResults, ...newSongs];
       appendSearchResults(newSongs);
     }
+    success = true;
   } catch (err) {
     if (requestId !== state.searchRequestId) return;
+    if (err.name === 'AbortError') {
+      isAbortError = true;
+      return;
+    }
     console.error('[Lazy Load Error]', err);
     showToast('获取更多歌曲失败', 'error');
   } finally {
@@ -1105,7 +1113,13 @@ async function loadNextPage() {
       if (state.searchAbortController === controller) {
         state.searchAbortController = null;
       }
-      showBottomLoadingIndicator(false);
+      if (success) {
+        showBottomLoadingIndicator(false);
+      } else if (!isAbortError) {
+        showBottomErrorIndicator();
+      } else {
+        showBottomLoadingIndicator(false);
+      }
     }
   }
 }
@@ -1118,17 +1132,37 @@ function showBottomLoadingIndicator(show) {
       indicator = document.createElement('div');
       indicator.id = 'bottomLoader';
       indicator.className = 'bottom-loader-indicator';
-      indicator.innerHTML = `
-        <div class="loading-spinner" style="width:20px; height:20px; margin: 0 auto;"></div>
-        <span style="font-size:0.8rem; color:var(--text-muted); margin-top:5px;">正在加载更多...</span>
-      `;
       el.songList.after(indicator);
     }
+    indicator.innerHTML = `
+      <div class="loading-spinner" style="width:20px; height:20px; margin: 0 auto;"></div>
+      <span style="font-size:0.8rem; color:var(--text-muted); margin-top:5px;">正在加载更多...</span>
+    `;
   } else {
     if (indicator) {
       indicator.remove();
     }
   }
+}
+
+// Show error retry layout at the bottom
+function showBottomErrorIndicator() {
+  let indicator = document.getElementById('bottomLoader');
+  if (!indicator) {
+    indicator = document.createElement('div');
+    indicator.id = 'bottomLoader';
+    indicator.className = 'bottom-loader-indicator';
+    el.songList.after(indicator);
+  }
+  indicator.innerHTML = `
+    <span class="bottom-loader-retry-btn" style="font-size: 0.8rem; color: var(--primary-accent); cursor: pointer; text-decoration: underline; font-weight: 500;">加载失败，点击重试</span>
+  `;
+  
+  const retryBtn = indicator.querySelector('.bottom-loader-retry-btn');
+  retryBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    loadNextPage();
+  });
 }
 
 // Render Search Results
@@ -1172,14 +1206,14 @@ function appendSearchResults(songs) {
       <div class="song-info">
         <div class="song-title">${escapeHtml(song.name)}</div>
         <div class="song-artist">${escapeHtml(song.singer)}</div>
-        <div class="player-progress-container" style="display: none;">
+        <div class="player-progress-container">
           <span class="player-current-time">00:00</span>
           <input type="range" class="player-progress-slider" min="0" max="100" value="0">
           <span class="player-total-time">${song.interval || '00:00'}</span>
         </div>
-        <div class="player-lyric-container" style="display: none;">
-          <div class="player-lyric-line active"></div>
-        </div>
+      </div>
+      <div class="player-lyric-container">
+        <div class="player-lyric-line active"></div>
       </div>
       <div class="song-album">${escapeHtml(song.albumName || '未知专辑')}</div>
       <div class="song-duration">${song.interval || '00:00'}</div>
@@ -1631,8 +1665,28 @@ function triggerLyricScrollSync() {
   audio.dispatchEvent(e);
 }
 
-// Fetch lyrics from NetEase as a universal fallback, proxying via functions/api/proxy.js
+// Fetch lyrics with native sandbox first, falling back to NetEase search proxy
 async function fetchLyrics(song) {
+  // 1. Try native source from sandbox first (extremely accurate & fast)
+  if (state.sandbox) {
+    try {
+      const resolved = await state.sandbox.requestUrl(song.source, 'lyric', {
+        musicInfo: toNewMusicInfo(song),
+      });
+      const lrcText = resolved?.lyric || resolved?.data?.lyric || resolved?.lrc || resolved?.data?.lrc || '';
+      if (lrcText) {
+        const parsed = parseLrc(lrcText);
+        if (parsed && parsed.length > 0) {
+          console.log('[Lyric] Successfully fetched native lyrics from sandbox');
+          return parsed;
+        }
+      }
+    } catch (err) {
+      console.warn('[Lyric] Native sandbox lyric fetch failed, trying NetEase fallback...', err);
+    }
+  }
+
+  // 2. Fallback: Search and proxy via NetEase (wy)
   let neteaseId = null;
   if (song.source === 'wy') {
     neteaseId = song.songmid;
@@ -1648,39 +1702,34 @@ async function fetchLyrics(song) {
         }
       }
     } catch (err) {
-      console.warn('[Lyric Search Netease failed]', err);
+      console.warn('[Lyric] Fallback NetEase search failed', err);
     }
   }
 
-  if (!neteaseId) {
-    if (state.sandbox) {
-      try {
-        const resolved = await state.sandbox.requestUrl(song.source, 'lyric', {
-          musicInfo: toNewMusicInfo(song),
-        });
-        const lrcText = resolved?.lyric || resolved?.data?.lyric || resolved?.lrc || resolved?.data?.lrc || '';
-        if (lrcText) return parseLrc(lrcText);
-      } catch (_) {}
+  if (neteaseId) {
+    try {
+      const lyricApiUrl = `https://music.163.com/api/song/lyric?id=${neteaseId}&lv=1&kv=1&tv=-1`;
+      const proxyRes = await fetch('/api/proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: lyricApiUrl, method: 'GET' })
+      });
+      if (proxyRes.ok) {
+        const data = await proxyRes.json();
+        const lyricText = data.lrc?.lyric || '';
+        if (lyricText) {
+          const parsed = parseLrc(lyricText);
+          if (parsed && parsed.length > 0) {
+            console.log('[Lyric] Successfully fetched fallback lyrics from NetEase');
+            return parsed;
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[Lyric] Fallback NetEase fetch failed', err);
     }
-    return [];
   }
 
-  try {
-    const lyricApiUrl = `https://music.163.com/api/song/lyric?id=${neteaseId}&lv=1&kv=1&tv=-1`;
-    const proxyRes = await fetch('/api/proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: lyricApiUrl, method: 'GET' })
-    });
-    if (!proxyRes.ok) throw new Error();
-    const data = await proxyRes.json();
-    const lyricText = data.lrc?.lyric || '';
-    if (lyricText) {
-      return parseLrc(lyricText);
-    }
-  } catch (err) {
-    console.warn('[Lyric Fetch failed]', err);
-  }
   return [];
 }
 

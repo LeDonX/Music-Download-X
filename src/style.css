@@ -688,6 +688,7 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: font-size 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .song-artist {
@@ -697,6 +698,7 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  transition: font-size 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .song-album {
@@ -1294,8 +1296,9 @@ body {
 }
 
 .song-item.expanded {
-  height: 116px;
-  grid-template-columns: 94px 1fr 0px 0px 86px;
+  height: 116px !important;
+  grid-template-columns: 94px 1fr 86px !important;
+  grid-template-rows: auto auto !important;
   background: #ffffff;
   border-color: var(--card-border);
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.04);
@@ -1307,8 +1310,10 @@ body {
 }
 
 .song-item.expanded .song-cover-wrapper {
-  width: 80px;
-  height: 80px;
+  width: 64px;
+  height: 64px;
+  grid-column: 1 / 2 !important;
+  grid-row: 1 / 3 !important; /* spans both rows on the left */
 }
 
 .song-item .play-btn {
@@ -1316,9 +1321,21 @@ body {
 }
 
 .song-item.expanded .song-actions {
-  display: flex;
+  grid-column: 3 / 4 !important;
+  grid-row: 1 / 3 !important; /* spans both rows to center vertically relative to the entire card */
+  align-self: center !important;
+  display: flex !important;
   flex-direction: row;
   align-items: center;
+  justify-content: flex-end;
+}
+
+.song-item.expanded .song-title {
+  font-size: 0.96rem;
+}
+
+.song-item.expanded .song-artist {
+  font-size: 0.78rem;
 }
 
 /* Progress Slider inside song-info */
@@ -1326,39 +1343,88 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 0;
   width: 100%;
-  padding-right: 24px;
   box-sizing: border-box;
-  animation: fadeIn 0.3s ease;
+  height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: height 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+              opacity 0.3s ease,
+              margin-top 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .song-item.expanded .player-progress-container {
-  display: flex !important;
-}
-
-.song-item.expanded .player-lyric-container {
-  display: block !important;
+  height: 20px;
+  opacity: 1;
+  margin-top: 4px;
+  pointer-events: auto;
 }
 
 .player-lyric-container {
-  margin-top: 6px;
-  height: 24px;
+  margin-top: 0;
+  height: 0;
+  opacity: 0;
   overflow: hidden;
   position: relative;
   width: 100%;
-  padding-right: 24px;
+  padding-left: 10px;
+  padding-right: 12px;
   box-sizing: border-box;
   pointer-events: none;
+  grid-column: 2 !important; /* Keep it in Column 2 in compact state to prevent pushing buttons */
+  transition: height 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+              opacity 0.3s ease,
+              margin-top 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* Keep items in DOM so Grid columns don't shift / squish actions column */
+.song-item.expanded .player-lyric-container {
+  grid-column: 2 / 4 !important; /* spans columns 2 and 3 to reach the right border under buttons */
+  grid-row: 2 / 3 !important;
+  margin-top: 4px;
+  height: 20px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Explicit Grid Columns for Desktop to allow items to be hidden without shifting actions column in compact state */
+@media (min-width: 769px) {
+  .song-item .song-cover-wrapper {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .song-item .song-info {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .song-item .player-lyric-container {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .song-item .song-album {
+    grid-column: 3;
+    grid-row: 1;
+  }
+  .song-item .song-duration {
+    grid-column: 4;
+    grid-row: 1;
+  }
+  .song-item .song-actions {
+    grid-column: 5;
+    grid-row: 1;
+  }
+
+  /* When expanded, the grid becomes 3 columns: cover (1), info (2), actions (3). Override placements accordingly */
+  .song-item.expanded .song-info {
+    grid-column: 2 / 3 !important;
+    grid-row: 1 / 2 !important;
+  }
+}
+
 .song-item.expanded .song-album,
 .song-item.expanded .song-duration {
-  opacity: 0;
-  pointer-events: none;
-  overflow: hidden;
-  white-space: nowrap;
+  display: none !important;
 }
 
 .player-current-time,
@@ -1370,6 +1436,7 @@ body {
 
 .player-progress-slider {
   flex: 1;
+  min-width: 0 !important;
   height: 4px;
   border-radius: 2px;
   background: #e2e8f0;
@@ -1403,8 +1470,8 @@ body {
 
 
 .player-lyric-line {
-  font-size: 0.76rem;
-  line-height: 24px;
+  font-size: 0.72rem;
+  line-height: 20px;
   color: var(--primary-accent);
   font-weight: 500;
   white-space: nowrap;
@@ -1427,20 +1494,40 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 
-/* Responsive updates for Expanded state */
+/* Responsive updates for Mobile */
 @media (max-width: 768px) {
   .song-item {
     height: 50px;
   }
+  .song-item .song-cover-wrapper {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .song-item .song-info {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .song-item .player-lyric-container {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .song-item .song-actions {
+    grid-column: 3;
+    grid-row: 1;
+  }
   .song-item.expanded {
-    grid-template-columns: 76px 1fr 84px;
-    height: 98px;
+    grid-template-columns: 64px 1fr 84px !important;
+    height: 98px !important;
   }
   .song-item.expanded .song-cover-wrapper {
     width: 64px;
     height: 64px;
   }
-  .player-progress-container {
+  .song-item.expanded .song-info {
+    grid-column: 2 / 3 !important;
+    grid-row: 1 / 2 !important;
+  }
+  .song-item.expanded .player-progress-container {
     margin-top: 4px;
     gap: 6px;
   }
