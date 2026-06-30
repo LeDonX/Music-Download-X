@@ -21,6 +21,7 @@ const PLATFORM_NAMES = {
 const SEARCH_TIMEOUT_MS = 18000;
 const SEARCH_EMPTY_RETRY_LIMIT = 3;
 const SEARCH_RETRY_DELAYS = [250, 700, 1400];
+const RESOLVE_TIMEOUT_MS = 22000;
 const ORDERED_QUALITIES = new Set(['128k', '320k', 'flac', 'flac24bit']);
 
 // Application State
@@ -264,6 +265,18 @@ function getPlatformName(source) {
   return PLATFORM_NAMES[source] || source || '未知平台';
 }
 
+function getSongKey(song) {
+  return `${song?.source || ''}_${song?.songmid || song?.hash || song?.copyrightId || ''}`;
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
+
 function getImageProxyUrl(url) {
   if (!url || !/^https?:\/\//i.test(url)) return '';
   return `/api/image?url=${encodeURIComponent(url)}`;
@@ -373,6 +386,23 @@ function buildPicParams(song) {
     name: song.name || '',
     singer: song.singer || '',
     img: song.img || '',
+  });
+}
+
+function buildLyricParams(song) {
+  return new URLSearchParams({
+    source: song.source || '',
+    songmid: song.songmid || '',
+    songId: song.songId || '',
+    hash: song.hash || getResolverId(song, '128k') || '',
+    copyrightId: song.copyrightId || '',
+    name: song.name || '',
+    singer: song.singer || '',
+    albumName: song.albumName || '',
+    interval: song.interval || '',
+    lrcUrl: song.lrcUrl || '',
+    mrcUrl: song.mrcUrl || '',
+    trcUrl: song.trcUrl || '',
   });
 }
 
@@ -600,8 +630,16 @@ async function resolveWithScripts(song, quality, statusText, validateResolution)
       statusText.innerText = `正在用${sourceName}解析 ${getPlatformName(song.source)}...`;
       console.log(`[Download] Trying resolution with resolver: ${url}`);
 
-      const sandboxInstance = await getOrLoadSandbox(url);
-      const { finalUrl, finalHeaders, finalType } = await resolveMusicUrl(sandboxInstance, song, quality);
+      const sandboxInstance = await withTimeout(
+        getOrLoadSandbox(url),
+        RESOLVE_TIMEOUT_MS,
+        `${sourceName}加载超时`
+      );
+      const { finalUrl, finalHeaders, finalType } = await withTimeout(
+        resolveMusicUrl(sandboxInstance, song, quality),
+        RESOLVE_TIMEOUT_MS,
+        `${sourceName}解析超时`
+      );
       if (finalUrl && finalUrl.startsWith('http')) {
         const resolution = {
           audioUrl: finalUrl,
@@ -848,24 +886,24 @@ function setupEventListeners() {
     el.customSelect.classList.remove('open');
   });
 
+  const maybeLoadMore = () => maybeLoadNextPage();
+
   // Intersection Observer for waterfall lazy loading (infinite scroll)
   const scrollAnchor = document.getElementById('scrollAnchor');
   if (scrollAnchor) {
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting) {
-        if (state.isLoading) return;
-        if (!state.currentKeyword) return;
-
-        const totalLoaded = state.currentResults.length;
-        if (totalLoaded >= state.totalCount) return;
-
-        loadNextPage();
+        maybeLoadMore();
       }
     }, {
       rootMargin: '150px', // Trigger when anchor is within 150px of the viewport bottom
     });
     observer.observe(scrollAnchor);
   }
+
+  // iOS Safari can miss 1px IntersectionObserver anchors while the browser chrome
+  // collapses/expands, so keep a scroll-position fallback for infinite loading.
+  setupScrollLoadFallback(maybeLoadMore);
 
   // Script load button
   el.saveScriptBtn.addEventListener('click', async () => {
@@ -956,6 +994,56 @@ function blurInteractiveTarget(e) {
       document.activeElement.blur();
     }
   });
+}
+
+function canLoadNextPage() {
+  if (state.isLoading) return false;
+  if (!state.currentKeyword) return false;
+  if (state.currentResults.length === 0) return false;
+  if (state.currentResults.length >= state.totalCount) return false;
+  return true;
+}
+
+function maybeLoadNextPage() {
+  if (!canLoadNextPage()) return;
+  loadNextPage();
+}
+
+function setupScrollLoadFallback(onNearBottom) {
+  const threshold = 260;
+  let ticking = false;
+
+  const getScrollTop = () => (
+    window.scrollY ||
+    document.documentElement.scrollTop ||
+    document.body.scrollTop ||
+    0
+  );
+
+  const getScrollHeight = () => Math.max(
+    document.documentElement.scrollHeight,
+    document.body.scrollHeight,
+  );
+
+  const checkNearBottom = () => {
+    ticking = false;
+    const viewportHeight = window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight;
+    const distanceToBottom = getScrollHeight() - (getScrollTop() + viewportHeight);
+    if (distanceToBottom <= threshold) {
+      onNearBottom();
+    }
+  };
+
+  const scheduleCheck = () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(checkNearBottom);
+  };
+
+  window.addEventListener('scroll', scheduleCheck, { passive: true });
+  window.addEventListener('touchend', scheduleCheck, { passive: true });
+  window.addEventListener('resize', scheduleCheck);
+  window.visualViewport?.addEventListener('resize', scheduleCheck);
 }
 
 // Load Custom Source Script
@@ -1069,9 +1157,6 @@ async function fetchPage(params, requestId = state.searchRequestId) {
 // Fetch Next Page (Waterfall Lazy Load Appender)
 async function loadNextPage() {
   const requestId = state.searchRequestId;
-  if (state.searchAbortController) {
-    state.searchAbortController.abort();
-  }
   state.isLoading = true;
   const nextPage = state.currentPage + 1;
   const params = getSearchParams(nextPage);
@@ -1195,6 +1280,7 @@ function appendSearchResults(songs) {
     const item = document.createElement('div');
     item.className = 'song-item';
     item.id = `song-item-${globalIdx}`;
+    const songKey = getSongKey(song);
 
     const hasCover = Boolean(song.img && /^https?:\/\//i.test(song.img));
 
@@ -1252,12 +1338,7 @@ function appendSearchResults(songs) {
       openDownloadModal(song);
     });
 
-    // Expand / Collapse card click handler
-    item.addEventListener('click', (e) => {
-      if (e.target.closest('button') || e.target.closest('.download-progress-wrapper') || e.target.closest('.play-progress-wrapper') || e.target.closest('.player-progress-container') || e.target.closest('.player-lyric-container')) {
-        return;
-      }
-
+    const setSongItemExpanded = ({ toggle = false } = {}) => {
       document.querySelectorAll('.song-item.expanded').forEach(el => {
         if (el !== item) {
           el.classList.remove('expanded');
@@ -1265,10 +1346,14 @@ function appendSearchResults(songs) {
       });
 
       const isExpanding = !item.classList.contains('expanded');
-      item.classList.toggle('expanded');
+      if (toggle) {
+        item.classList.toggle('expanded');
+      } else {
+        item.classList.add('expanded');
+      }
 
-      if (isExpanding) {
-        if (activeSongId === song.songmid) {
+      if (isExpanding || item.classList.contains('expanded')) {
+        if (activeSongId === songKey) {
           activePlayBtn = item.querySelector('.play-btn');
           activeProgressSlider = item.querySelector('.player-progress-slider');
           activeCurrentTimeText = item.querySelector('.player-current-time');
@@ -1292,31 +1377,72 @@ function appendSearchResults(songs) {
           item.querySelector('.player-lyric-line').innerText = '';
         }
       }
+    };
+
+    // Expand / Collapse card click handler
+    item.addEventListener('click', (e) => {
+      if (e.target.closest('button') || e.target.closest('.download-progress-wrapper') || e.target.closest('.play-progress-wrapper') || e.target.closest('.player-progress-container') || e.target.closest('.player-lyric-container')) {
+        return;
+      }
+
+      setSongItemExpanded({ toggle: true });
     });
 
     // Play Button click handler
     const playBtn = item.querySelector('.play-btn');
     playBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      setSongItemExpanded();
       togglePlay(song, item);
     });
 
     // Seek range input handlers
     const slider = item.querySelector('.player-progress-slider');
     const currentTimeText = item.querySelector('.player-current-time');
-    slider.addEventListener('input', () => {
+
+    const seekAudioFromSlider = () => {
+      if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+      const seekTime = (Number(slider.value) / 100) * audio.duration;
+      audio.currentTime = seekTime;
+      currentTimeText.innerText = formatTime(seekTime);
+      if (activeSongId === songKey) {
+        triggerLyricScrollSync();
+      }
+    };
+
+    slider.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
       isUserSeeking = true;
-      if (audio.duration) {
-        const seekTime = (slider.value / 100) * audio.duration;
-        currentTimeText.innerText = formatTime(seekTime);
-      }
     });
-    slider.addEventListener('change', () => {
-      if (audio.duration) {
-        audio.currentTime = (slider.value / 100) * audio.duration;
-      }
+
+    slider.addEventListener('input', (e) => {
+      e.stopPropagation();
+      isUserSeeking = true;
+      seekAudioFromSlider();
+    });
+
+    slider.addEventListener('change', (e) => {
+      e.stopPropagation();
+      seekAudioFromSlider();
       isUserSeeking = false;
     });
+
+    slider.addEventListener('pointerup', (e) => {
+      e.stopPropagation();
+      seekAudioFromSlider();
+      isUserSeeking = false;
+    });
+
+    slider.addEventListener('pointercancel', () => {
+      isUserSeeking = false;
+    });
+
+    slider.addEventListener('touchend', (e) => {
+      e.stopPropagation();
+      seekAudioFromSlider();
+      isUserSeeking = false;
+    });
+
     slider.addEventListener('click', (e) => e.stopPropagation());
 
     el.songList.appendChild(item);
@@ -1369,8 +1495,10 @@ function openDownloadModal(song) {
   const activeSources = state.sandbox?.sources || {};
   const scriptSupportedQualities = activeSources[song.source]?.qualitys || [];
   
-  // Intersect them
-  const supported = songQualities.filter(q => scriptSupportedQualities.includes(q));
+  // Intersect them after the resolver is loaded; before that, keep the song's own qualities selectable.
+  const supported = scriptSupportedQualities.length
+    ? songQualities.filter(q => scriptSupportedQualities.includes(q))
+    : songQualities;
   
   el.qualityBtns.forEach(btn => {
     const q = btn.getAttribute('data-quality');
@@ -1665,69 +1793,51 @@ function triggerLyricScrollSync() {
   audio.dispatchEvent(e);
 }
 
-// Fetch lyrics with native sandbox first, falling back to NetEase search proxy
+function getLyricTextFromPayload(payload) {
+  if (!payload) return '';
+  const data = payload.data || payload;
+  return data.lyric || data.lrc || data.rawLrc || data.lxlyric || data.text || '';
+}
+
+// Fetch lyrics with native sandbox first, falling back to platform APIs.
 async function fetchLyrics(song) {
-  // 1. Try native source from sandbox first (extremely accurate & fast)
+  // 1. Try native source from sandbox first (extremely accurate & fast).
   if (state.sandbox) {
-    try {
-      const resolved = await state.sandbox.requestUrl(song.source, 'lyric', {
-        musicInfo: toNewMusicInfo(song),
-      });
-      const lrcText = resolved?.lyric || resolved?.data?.lyric || resolved?.lrc || resolved?.data?.lrc || '';
-      if (lrcText) {
+    const attempts = [
+      { label: 'new', musicInfo: toNewMusicInfo(song) },
+      { label: 'old', musicInfo: toOldMusicInfo(song) },
+    ];
+
+    for (const attempt of attempts) {
+      try {
+        const resolved = await state.sandbox.requestUrl(song.source, 'lyric', {
+          musicInfo: attempt.musicInfo,
+        });
+        const lrcText = getLyricTextFromPayload(resolved);
         const parsed = parseLrc(lrcText);
         if (parsed && parsed.length > 0) {
-          console.log('[Lyric] Successfully fetched native lyrics from sandbox');
+          console.log(`[Lyric] Successfully fetched native lyrics from sandbox (${attempt.label})`);
           return parsed;
         }
+      } catch (err) {
+        console.warn(`[Lyric] Native sandbox ${attempt.label} lyric fetch failed, trying next source...`, err);
       }
-    } catch (err) {
-      console.warn('[Lyric] Native sandbox lyric fetch failed, trying NetEase fallback...', err);
     }
   }
 
-  // 2. Fallback: Search and proxy via NetEase (wy)
-  let neteaseId = null;
-  if (song.source === 'wy') {
-    neteaseId = song.songmid;
-  } else {
-    try {
-      const searchUrl = `/api/search?keyword=${encodeURIComponent(song.singer + ' ' + song.name)}&source=wy&page=1&limit=1`;
-      const res = await fetch(searchUrl);
-      if (res.ok) {
-        const data = await res.json();
-        const match = data.list?.[0];
-        if (match) {
-          neteaseId = match.songmid;
-        }
+  // 2. Fallback: ask the worker to try platform official lyric APIs and cross-source matches.
+  try {
+    const res = await fetch(`/api/lyric?${buildLyricParams(song).toString()}`, { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      const parsed = parseLrc(getLyricTextFromPayload(data));
+      if (parsed && parsed.length > 0) {
+        console.log(`[Lyric] Successfully fetched fallback lyrics from ${data.provider || 'api'}`);
+        return parsed;
       }
-    } catch (err) {
-      console.warn('[Lyric] Fallback NetEase search failed', err);
     }
-  }
-
-  if (neteaseId) {
-    try {
-      const lyricApiUrl = `https://music.163.com/api/song/lyric?id=${neteaseId}&lv=1&kv=1&tv=-1`;
-      const proxyRes = await fetch('/api/proxy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: lyricApiUrl, method: 'GET' })
-      });
-      if (proxyRes.ok) {
-        const data = await proxyRes.json();
-        const lyricText = data.lrc?.lyric || '';
-        if (lyricText) {
-          const parsed = parseLrc(lyricText);
-          if (parsed && parsed.length > 0) {
-            console.log('[Lyric] Successfully fetched fallback lyrics from NetEase');
-            return parsed;
-          }
-        }
-      }
-    } catch (err) {
-      console.warn('[Lyric] Fallback NetEase fetch failed', err);
-    }
+  } catch (err) {
+    console.warn('[Lyric] Platform fallback lyric fetch failed', err);
   }
 
   return [];
@@ -1738,7 +1848,11 @@ function parseLrc(lrcText) {
   const parsed = [];
   const timeReg = /\[(\d+):(\d+)(?:\.(\d+))?\]/g;
   for (const line of lines) {
-    const text = line.replace(timeReg, '').trim();
+    const text = line
+      .replace(timeReg, '')
+      .replace(/<(-?\d+),(-?\d+)(?:,-?\d+)?>/g, '')
+      .replace(/\((\d+),(\d+)\)/g, '')
+      .trim();
     let match;
     timeReg.lastIndex = 0;
     while ((match = timeReg.exec(line)) !== null) {
@@ -1753,13 +1867,14 @@ function parseLrc(lrcText) {
 }
 
 async function togglePlay(song, itemEl) {
+  const songKey = getSongKey(song);
   const playWrapper = itemEl.querySelector('.play-progress-wrapper');
   const playBtn = itemEl.querySelector('.play-btn');
   const slider = itemEl.querySelector('.player-progress-slider');
   const currentTimeText = itemEl.querySelector('.player-current-time');
   const totalTimeText = itemEl.querySelector('.player-total-time');
 
-  if (activeSongId === song.songmid) {
+  if (activeSongId === songKey) {
     if (audio.paused) {
       try {
         await audio.play();
@@ -1773,25 +1888,17 @@ async function togglePlay(song, itemEl) {
   }
 
   // Cancel any currently loading song
-  if (loadingSongId) {
+  if (loadingSongId && loadingSongId !== songKey) {
     const prevLoadingWrapper = document.querySelector(`.play-progress-wrapper.loading`);
     if (prevLoadingWrapper) {
       prevLoadingWrapper.classList.remove('loading');
     }
+    loadingSongId = null;
   }
 
   // Set new loading state
-  loadingSongId = song.songmid;
+  loadingSongId = songKey;
   playWrapper.classList.add('loading');
-
-  let pendingLyrics = [];
-  fetchLyrics(song).then((parsedLyrics) => {
-    if (loadingSongId === song.songmid) {
-      pendingLyrics = parsedLyrics;
-    }
-  }).catch((err) => {
-    console.error('[Lyric Fetch Error]', err);
-  });
 
   const dummyStatusText = {
     set innerText(val) {
@@ -1803,7 +1910,7 @@ async function togglePlay(song, itemEl) {
     const displayFilename = buildSongFilename(song, 'mp3');
     const { downloadUrl } = await createDownloadLinkWithFallback(song, '128k', displayFilename, dummyStatusText);
     
-    if (loadingSongId !== song.songmid) return;
+    if (loadingSongId !== songKey) return;
     
     // Loaded URL successfully! Stop current song and switch now
     loadingSongId = null;
@@ -1823,7 +1930,7 @@ async function togglePlay(song, itemEl) {
       }
     }
 
-    activeSongId = song.songmid;
+    activeSongId = songKey;
     activePlayBtn = playBtn;
     activeProgressSlider = slider;
     activeCurrentTimeText = currentTimeText;
@@ -1831,19 +1938,29 @@ async function togglePlay(song, itemEl) {
     activeLyricContainer = itemEl.querySelector('.player-lyric-container');
     activeLyricLineEl = itemEl.querySelector('.player-lyric-line');
     
-    activeLyrics = pendingLyrics;
+    activeLyrics = [];
     lastLyricIndex = -1;
-
-    if (activeLyrics.length === 0) {
-      if (activeLyricLineEl) activeLyricLineEl.innerText = '暂无歌词';
-    } else {
-      triggerLyricScrollSync();
-    }
 
     currentTimeText.innerText = '00:00';
     slider.value = 0;
+    if (activeLyricLineEl) activeLyricLineEl.innerText = '歌词加载中...';
 
     audio.src = downloadUrl + '&play=1';
+    fetchLyrics(song).then((parsedLyrics) => {
+      if (activeSongId !== songKey) return;
+      activeLyrics = parsedLyrics || [];
+      lastLyricIndex = -1;
+      if (activeLyrics.length === 0) {
+        if (activeLyricLineEl) activeLyricLineEl.innerText = '暂无歌词';
+        return;
+      }
+      triggerLyricScrollSync();
+    }).catch((err) => {
+      console.error('[Lyric Fetch Error]', err);
+      if (activeSongId === songKey && activeLyricLineEl) {
+        activeLyricLineEl.innerText = '暂无歌词';
+      }
+    });
     
     try {
       await audio.play();
@@ -1852,7 +1969,7 @@ async function togglePlay(song, itemEl) {
       resetActiveSongUI();
     }
   } catch (err) {
-    if (loadingSongId === song.songmid) {
+    if (loadingSongId === songKey) {
       loadingSongId = null;
       playWrapper.classList.remove('loading');
       showToast('解析失败: ' + err.message, 'error');

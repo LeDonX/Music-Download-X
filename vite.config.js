@@ -1,8 +1,8 @@
-import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
   server: {
+    host: '0.0.0.0',
     port: 5173,
     strictPort: true,
     proxy: {
@@ -17,8 +17,8 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        main: resolve(__dirname, 'index.html'),
-        download: resolve(__dirname, 'download.html'),
+        main: 'index.html',
+        download: 'download.html',
       },
     },
   }

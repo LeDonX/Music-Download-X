@@ -505,13 +505,13 @@ function streamFlacWithMetadata(sourceStream, metadataBlocks) {
   });
 }
 
-function getDownloadHeaders(url, customHeaders = {}) {
+function getDownloadHeaders(url, customHeaders = {}, range = 'bytes=0-') {
   const targetUrl = new URL(url);
   const fetchHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': '*/*',
-    'Range': 'bytes=0-',
   };
+  if (range) fetchHeaders.Range = range;
   const referer = getReferer(targetUrl);
   if (referer) {
     fetchHeaders.Referer = referer;
@@ -539,7 +539,7 @@ function getExt(filename, metaExt, contentType) {
   return '';
 }
 
-async function handleDownload(url, filename, headers, meta = {}, requestUrl = '') {
+async function handleDownload(url, filename, headers, meta = {}, requestUrl = '', requestHeaders = new Headers()) {
   if (!url) {
     return new Response('Missing URL parameter', {
       status: 400,
@@ -557,17 +557,12 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
     });
   }
 
-  if (!['http:', 'https:'].includes(targetUrl.protocol)) {
-    return new Response('Unsupported URL protocol', {
-      status: 400,
-      headers: { 'Access-Control-Allow-Origin': '*' },
-    });
-  }
-
   try {
-    const coverPromise = fetchCoverBytes(meta.cover || '', requestUrl);
+    const isPlayback = meta.play === '1';
+    const requestRange = requestHeaders.get('range') || '';
+    const coverPromise = isPlayback ? Promise.resolve(null) : fetchCoverBytes(meta.cover || '', requestUrl);
     const res = await fetch(targetUrl.toString(), {
-      headers: getDownloadHeaders(targetUrl.toString(), headers),
+      headers: getDownloadHeaders(targetUrl.toString(), headers, isPlayback ? (requestRange || 'bytes=0-') : 'bytes=0-'),
       redirect: 'follow',
     });
 
@@ -594,8 +589,9 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
     let body = res.body;
     let transformed = false;
     let coverEmbedded = false;
+    const canTransform = !isPlayback;
 
-    if (body && ext === 'mp3') {
+    if (body && canTransform && ext === 'mp3') {
       const cover = await coverPromise;
       const id3Tag = createId3Tag(meta, cover);
       if (id3Tag) {
@@ -605,7 +601,7 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
         coverEmbedded = Boolean(cover);
         if (expectedLength > 0) expectedLength += id3Tag.length - prepared.removedBytes;
       }
-    } else if (body && ext === 'flac') {
+    } else if (body && canTransform && ext === 'flac') {
       const cover = await coverPromise;
       const vorbisBlock = createFlacVorbisCommentBlock(meta);
       const pictureBlock = cover ? createFlacPictureBlock(cover, true) : null;
@@ -622,7 +618,7 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
       responseHeaders.set('Content-Length', String(expectedLength));
       responseHeaders.set('X-Content-Length', String(expectedLength));
     }
-    if (meta.play === '1') {
+    if (isPlayback) {
       responseHeaders.set('Content-Disposition', 'inline');
     } else {
       responseHeaders.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename || 'music.mp3')}`);
@@ -630,13 +626,15 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
     responseHeaders.set('Content-Type', originalType || 'application/octet-stream');
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('Access-Control-Allow-Headers', '*');
-    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, X-Content-Length, X-Cover-Embedded');
+    responseHeaders.set('Accept-Ranges', res.headers.get('accept-ranges') || 'bytes');
+    if (res.headers.get('content-range')) responseHeaders.set('Content-Range', res.headers.get('content-range'));
+    responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, X-Content-Length, X-Cover-Embedded, Content-Range, Accept-Ranges');
     responseHeaders.set('X-Cover-Embedded', coverEmbedded ? '1' : '0');
 
-    const fixedLengthBody = createFixedLengthBody(body, expectedLength);
+    const fixedLengthBody = transformed ? createFixedLengthBody(body, expectedLength) : null;
 
     return new Response(fixedLengthBody || body, {
-      status: 200,
+      status: isPlayback && res.status === 206 ? 206 : 200,
       headers: responseHeaders,
     });
   } catch (err) {
@@ -668,13 +666,13 @@ export async function onRequestGet(context) {
     cover: searchParams.get('cover') || '',
     ext: searchParams.get('ext') || '',
     play: searchParams.get('play') || '',
-  }, context.request.url);
+  }, context.request.url, context.request.headers);
 }
 
 export async function onRequestPost(context) {
   try {
     const { url, filename, headers, meta } = await context.request.json();
-    return handleDownload(url, filename, headers || {}, meta || {}, context.request.url);
+    return handleDownload(url, filename, headers || {}, meta || {}, context.request.url, context.request.headers);
   } catch (err) {
     return new Response(err.message, {
       status: 400,
