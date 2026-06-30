@@ -286,6 +286,11 @@ function isWeChatBrowser() {
   return /MicroMessenger/i.test(navigator.userAgent || '');
 }
 
+function isIOSBrowser() {
+  const ua = navigator.userAgent || '';
+  return /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
 function toAbsoluteUrl(url) {
   return new URL(url, window.location.href).toString();
 }
@@ -375,6 +380,157 @@ function showWeChatDownloadModal(downloadUrl, filename) {
 
   document.body.appendChild(overlay);
   return pageUrl;
+}
+
+function formatFileSize(bytes) {
+  const size = Number(bytes || 0);
+  if (!Number.isFinite(size) || size <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = size;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const digits = value >= 100 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function getMimeTypeFromFilename(filename) {
+  const ext = String(filename || '').toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || '';
+  if (ext === 'mp3') return 'audio/mpeg';
+  if (ext === 'flac') return 'audio/flac';
+  return 'application/octet-stream';
+}
+
+function getDownloadContentLength(res) {
+  return Number(res.headers.get('x-content-length') || res.headers.get('content-length') || 0);
+}
+
+function triggerBrowserDownload(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+async function saveBlobFromPage(blob, filename) {
+  const type = blob.type || getMimeTypeFromFilename(filename);
+  const file = typeof File === 'function' ? new File([blob], filename, { type }) : null;
+
+  try {
+    if (file && navigator.share && navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file], title: filename });
+      return;
+    }
+  } catch (err) {
+    if (err?.name === 'AbortError') throw err;
+  }
+
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = filename;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+}
+
+function showInPageSaveAction({ actionEl, blob, filename, statusText }) {
+  if (!actionEl) return;
+
+  const button = document.createElement('button');
+  button.className = 'queue-save-btn';
+  button.type = 'button';
+  button.textContent = '保存文件';
+  actionEl.innerHTML = '';
+  actionEl.appendChild(button);
+
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    statusText.innerText = '正在打开保存面板...';
+    try {
+      await saveBlobFromPage(blob, filename);
+      statusText.innerText = '已打开保存面板，请选择存储位置';
+      statusText.className = 'queue-status completed';
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        statusText.innerText = '保存已取消，可重新点击保存文件';
+        statusText.className = 'queue-status warning';
+      } else {
+        statusText.innerText = '保存失败，可重新点击保存文件';
+        statusText.className = 'queue-status failed';
+        console.warn('[Download] in-page save failed:', err);
+      }
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+async function downloadInsidePage(downloadUrl, filename, ui, song) {
+  const { statusText, sizeText, progressFill, pctText, actionEl } = ui;
+  statusText.innerText = '正在网页内生成带封面文件...';
+  sizeText.innerText = '正在连接...';
+  progressFill.style.width = '5%';
+  pctText.innerText = '0%';
+
+  const res = await fetch(downloadUrl, { cache: 'no-store' });
+  if (!res.ok) {
+    const message = (await res.text().catch(() => '')).slice(0, 160);
+    throw new Error(message || `HTTP ${res.status}`);
+  }
+
+  const total = getDownloadContentLength(res);
+  const contentType = res.headers.get('content-type') || getMimeTypeFromFilename(filename);
+  let received = 0;
+  let lastPct = 0;
+
+  const updateProgress = () => {
+    if (total > 0) {
+      const pct = Math.max(1, Math.min(99, Math.floor((received / total) * 100)));
+      if (pct !== lastPct) {
+        lastPct = pct;
+        progressFill.style.width = `${pct}%`;
+        pctText.innerText = `${pct}%`;
+        updateDownloadProgressOnCard(song.songmid, song.source, pct);
+      }
+      sizeText.innerText = `${formatFileSize(received)} / ${formatFileSize(total)}`;
+    } else {
+      progressFill.style.width = '35%';
+      pctText.innerText = formatFileSize(received) || '接收中';
+      sizeText.innerText = '正在接收文件...';
+    }
+  };
+
+  let blob;
+  if (res.body?.getReader) {
+    const reader = res.body.getReader();
+    const chunks = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      updateProgress();
+    }
+    blob = new Blob(chunks, { type: contentType });
+  } else {
+    blob = await res.blob();
+    received = blob.size;
+  }
+
+  progressFill.style.width = '100%';
+  pctText.innerText = '100%';
+  sizeText.innerText = formatFileSize(blob.size) || '已完成';
+  statusText.innerText = '文件已在网页内准备好，请点击保存';
+  statusText.className = 'queue-status completed';
+  updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
+  showInPageSaveAction({ actionEl, blob, filename, statusText });
 }
 
 function buildPicParams(song) {
@@ -1389,9 +1545,10 @@ function appendSearchResults(songs) {
     });
 
     // Play Button click handler
-    const playBtn = item.querySelector('.play-btn');
-    playBtn.addEventListener('click', (e) => {
+    const playWrapper = item.querySelector('.play-progress-wrapper');
+    playWrapper.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (playWrapper.classList.contains('loading')) return;
       setSongItemExpanded();
       togglePlay(song, item);
     });
@@ -1539,6 +1696,7 @@ async function startDownloadTask(song, quality) {
       <div class="queue-status" id="task-status-${taskId}">等待获取链接</div>
       <div class="queue-percentage" id="task-pct-${taskId}">0%</div>
     </div>
+    <div class="queue-action" id="task-action-${taskId}"></div>
   `;
 
   // Insert to the top of queue
@@ -1556,8 +1714,10 @@ async function startDownloadTask(song, quality) {
     const sizeText = document.getElementById(`task-size-${taskId}`);
     const progressFill = document.getElementById(`task-progress-${taskId}`);
     const pctText = document.getElementById(`task-pct-${taskId}`);
+    const actionEl = document.getElementById(`task-action-${taskId}`);
 
-    statusText.innerText = '正在解析链接...';
+    const useInPageDownload = isIOSBrowser() && !isWeChatBrowser();
+    statusText.innerText = useInPageDownload ? '正在解析页内下载链接...' : '正在解析链接...';
     updateDownloadProgressOnCard(song.songmid, song.source, 5);
 
     const { downloadUrl, resolution, mediaInfo, finalFilename } = await createDownloadLinkWithFallback(song, quality, displayFilename, statusText);
@@ -1589,12 +1749,19 @@ async function startDownloadTask(song, quality) {
       return;
     }
 
-    const a = document.createElement('a');
-    a.href = downloadUrl;
-    a.download = finalFilename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    if (useInPageDownload) {
+      await downloadInsidePage(downloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song);
+      if (isQualityChanged) {
+        showToast(`文件已生成: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
+      } else if (usedFallback) {
+        showToast(`文件已生成: ${song.name} (已自动切换到${getPlatformName(resolvedSong.source)})`, 'success');
+      } else {
+        showToast('文件已生成，点击保存文件即可存到手机', 'success');
+      }
+      return;
+    }
+
+    triggerBrowserDownload(downloadUrl, finalFilename);
 
     statusText.innerText = '已创建浏览器下载任务' + qualityWarnText;
     statusText.className = 'queue-status completed';

@@ -590,6 +590,7 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
     let transformed = false;
     let coverEmbedded = false;
     const canTransform = !isPlayback;
+    const responseStatus = isPlayback && res.status === 206 ? 206 : 200;
 
     if (body && canTransform && ext === 'mp3') {
       const cover = await coverPromise;
@@ -627,14 +628,14 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
     responseHeaders.set('Access-Control-Allow-Origin', '*');
     responseHeaders.set('Access-Control-Allow-Headers', '*');
     responseHeaders.set('Accept-Ranges', res.headers.get('accept-ranges') || 'bytes');
-    if (res.headers.get('content-range')) responseHeaders.set('Content-Range', res.headers.get('content-range'));
+    if (responseStatus === 206 && res.headers.get('content-range')) responseHeaders.set('Content-Range', res.headers.get('content-range'));
     responseHeaders.set('Access-Control-Expose-Headers', 'Content-Length, X-Content-Length, X-Cover-Embedded, Content-Range, Accept-Ranges');
     responseHeaders.set('X-Cover-Embedded', coverEmbedded ? '1' : '0');
 
     const fixedLengthBody = transformed ? createFixedLengthBody(body, expectedLength) : null;
 
     return new Response(fixedLengthBody || body, {
-      status: isPlayback && res.status === 206 ? 206 : 200,
+      status: responseStatus,
       headers: responseHeaders,
     });
   } catch (err) {

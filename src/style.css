@@ -797,6 +797,28 @@ body {
   color: #b45309;
 }
 
+.queue-action {
+  margin-top: 8px;
+  display: flex;
+}
+
+.queue-save-btn {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--primary-accent);
+  border-radius: 10px;
+  background: var(--primary-accent);
+  color: var(--text-light);
+  font-size: 0.86rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.queue-save-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
 /* Quality Selection Modal */
 .modal-overlay {
   position: fixed;
