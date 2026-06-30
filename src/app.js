@@ -416,6 +416,10 @@ function triggerBrowserDownload(url, filename) {
   document.body.removeChild(a);
 }
 
+function getReadableError(err) {
+  return err?.message || err?.name || String(err || '未知错误');
+}
+
 async function saveBlobFromPage(blob, filename) {
   const type = blob.type || getMimeTypeFromFilename(filename);
   const file = typeof File === 'function' ? new File([blob], filename, { type }) : null;
@@ -469,6 +473,23 @@ function showInPageSaveAction({ actionEl, blob, filename, statusText }) {
     } finally {
       button.disabled = false;
     }
+  });
+}
+
+function showBrowserDownloadAction({ actionEl, downloadUrl, filename, statusText }) {
+  if (!actionEl) return;
+
+  const button = document.createElement('button');
+  button.className = 'queue-save-btn';
+  button.type = 'button';
+  button.textContent = '用浏览器下载';
+  actionEl.innerHTML = '';
+  actionEl.appendChild(button);
+
+  button.addEventListener('click', () => {
+    triggerBrowserDownload(downloadUrl, filename);
+    statusText.innerText = '已交给浏览器下载，请查看下载列表';
+    statusText.className = 'queue-status completed';
   });
 }
 
@@ -1750,13 +1771,26 @@ async function startDownloadTask(song, quality) {
     }
 
     if (useInPageDownload) {
-      await downloadInsidePage(downloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song);
-      if (isQualityChanged) {
-        showToast(`文件已生成: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
-      } else if (usedFallback) {
-        showToast(`文件已生成: ${song.name} (已自动切换到${getPlatformName(resolvedSong.source)})`, 'success');
-      } else {
-        showToast('文件已生成，点击保存文件即可存到手机', 'success');
+      try {
+        await downloadInsidePage(downloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song);
+        if (isQualityChanged) {
+          showToast(`文件已生成: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
+        } else if (usedFallback) {
+          showToast(`文件已生成: ${song.name} (已自动切换到${getPlatformName(resolvedSong.source)})`, 'success');
+        } else {
+          showToast('文件已生成，点击保存文件即可存到手机', 'success');
+        }
+      } catch (err) {
+        console.warn('[Download] in-page download interrupted:', err);
+        const reason = getReadableError(err);
+        statusText.innerText = `网页内下载中断: ${reason}`;
+        statusText.className = 'queue-status warning';
+        sizeText.innerText = '可改用浏览器下载同一文件';
+        progressFill.style.width = '100%';
+        pctText.innerText = '待处理';
+        updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
+        showBrowserDownloadAction({ actionEl, downloadUrl, filename: finalFilename, statusText });
+        showToast('网页内下载中断，请点击“用浏览器下载”继续', 'warning');
       }
       return;
     }
