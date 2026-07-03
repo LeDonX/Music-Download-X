@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>分享播放 - Music Download X</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body class="share-page-body">
+  <main class="share-page">
+    <img id="shareBgCover" class="share-bg-cover" alt="" aria-hidden="true">
+    <div class="share-bg-layer" aria-hidden="true"></div>
+
+    <section class="share-cover-stage" aria-label="歌曲封面">
+      <div class="share-cover-frame">
+        <div id="shareCoverPlaceholder" class="share-cover-placeholder">♪</div>
+        <img id="shareCover" class="share-cover" alt="歌曲封面">
+      </div>
+    </section>
+
+    <section class="share-player-panel" aria-label="分享播放">
+      <div class="share-song-info">
+        <h1 id="shareTitle" class="share-title">歌曲</h1>
+        <div id="shareArtist" class="share-artist">歌手</div>
+        <div id="shareLyricList" class="share-lyric-list">
+          <div class="share-lyric-row previous"><span class="share-lyric-text"></span><span class="share-lyric-fill" aria-hidden="true"></span></div>
+          <div class="share-lyric-row active"><span class="share-lyric-text">歌词加载中...</span><span class="share-lyric-fill" aria-hidden="true">歌词加载中...</span></div>
+          <div class="share-lyric-row next"><span class="share-lyric-text"></span><span class="share-lyric-fill" aria-hidden="true"></span></div>
+        </div>
+      </div>
+
+      <div class="share-progress-wrap">
+        <div class="share-progress-times">
+          <span id="shareCurrentTime">00:00</span>
+          <span id="shareDuration">00:00</span>
+        </div>
+        <input id="shareProgressSlider" class="share-progress-slider" type="range" min="0" max="100" value="0" step="0.1" aria-label="播放进度">
+      </div>
+      <div class="share-control-row">
+        <button id="shareHomeBtn" class="share-panel-icon-btn" type="button" title="回到主页" aria-label="回到主页">
+          <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="m3 12 9-9 9 9"/>
+            <path d="M5 10v10h14V10"/>
+          </svg>
+        </button>
+        <button id="sharePlayBtn" class="share-play-toggle" type="button" title="播放" aria-label="播放">
+          <svg class="share-play-icon" width="34" height="34" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+          <svg class="share-pause-icon" width="34" height="34" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+          </svg>
+        </button>
+        <button id="shareDownloadBtn" class="share-panel-icon-btn" type="button" title="下载" aria-label="下载">
+          <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <path d="M7 10l5 5 5-5"/>
+            <path d="M12 15V3"/>
+          </svg>
+        </button>
+      </div>
+      <p id="shareHint" class="share-hint"></p>
+    </section>
+  </main>
+  <script type="module" src="/src/share.js"></script>
+</body>
+</html>

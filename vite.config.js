@@ -1,5 +1,7 @@
 import { defineConfig } from 'vite';
 
+const apiPort = process.env.API_PORT || '5174';
+
 export default defineConfig({
   server: {
     host: '0.0.0.0',
@@ -7,7 +9,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8788',
+        target: `http://127.0.0.1:${apiPort}`,
         changeOrigin: true,
       }
     }
@@ -19,6 +21,7 @@ export default defineConfig({
       input: {
         main: 'index.html',
         download: 'download.html',
+        share: 'share.html',
       },
     },
   }

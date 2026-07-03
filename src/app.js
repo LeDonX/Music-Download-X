@@ -36,6 +36,7 @@ const state = {
   limit: 15,
   currentKeyword: '',
   isLoading: false,
+  activeDownloadTask: null,
   searchRequestId: 0,
   searchAbortController: null,
   activeSearchKey: '',
@@ -304,6 +305,19 @@ function buildDownloadPageUrl(downloadUrl, filename) {
   return pageUrl.toString();
 }
 
+function buildSharePageUrl(payload) {
+  const pageUrl = new URL('/share.html', window.location.href);
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  pageUrl.hash = new URLSearchParams({
+    data: btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''),
+  }).toString();
+  return pageUrl.toString();
+}
+
 function buildHomePageUrl() {
   return new URL('/', window.location.href).toString();
 }
@@ -382,6 +396,54 @@ function showWeChatDownloadModal(downloadUrl, filename) {
   return pageUrl;
 }
 
+function closeShareLinkModal() {
+  document.getElementById('shareLinkModal')?.remove();
+}
+
+function showShareLinkModal(shareUrl) {
+  closeShareLinkModal();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'shareLinkModal';
+  overlay.className = 'modal-overlay active share-link-modal';
+  overlay.innerHTML = `
+    <div class="glass-panel modal-content share-link-content">
+      <h3 class="modal-title">分享链接已生成</h3>
+      <p class="wechat-download-tip">浏览器没有允许自动复制，请手动复制下面的链接。</p>
+      <textarea class="share-link-textarea" readonly>${escapeHtml(shareUrl)}</textarea>
+      <div class="wechat-download-actions">
+        <button class="wechat-download-btn primary" type="button" data-action="copy-share">复制链接</button>
+      </div>
+      <button class="modal-close-btn" type="button" data-action="close">关闭</button>
+    </div>
+  `;
+
+  overlay.addEventListener('click', async (e) => {
+    const action = e.target?.getAttribute?.('data-action');
+    if (e.target === overlay || action === 'close') {
+      closeShareLinkModal();
+      return;
+    }
+    if (action === 'copy-share') {
+      try {
+        await copyTextToClipboard(shareUrl);
+        showToast('分享链接已复制', 'success');
+        closeShareLinkModal();
+      } catch (err) {
+        const textarea = overlay.querySelector('.share-link-textarea');
+        textarea?.focus();
+        textarea?.select();
+        showToast('复制失败，请手动选择链接复制', 'error');
+      }
+    }
+  });
+
+  document.body.appendChild(overlay);
+  const textarea = overlay.querySelector('.share-link-textarea');
+  textarea?.focus();
+  textarea?.select();
+}
+
 function formatFileSize(bytes) {
   const size = Number(bytes || 0);
   if (!Number.isFinite(size) || size <= 0) return '';
@@ -414,6 +476,33 @@ function triggerBrowserDownload(url, filename) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+}
+
+function getActiveDownloadName() {
+  return state.activeDownloadTask?.songName || '当前歌曲';
+}
+
+function isDownloadBusy() {
+  return Boolean(state.activeDownloadTask);
+}
+
+function lockDownloadTask(taskId, song) {
+  state.activeDownloadTask = {
+    id: taskId,
+    songName: song?.name || '当前歌曲',
+    source: song?.source || '',
+    songmid: song?.songmid || '',
+  };
+}
+
+function releaseDownloadTask(taskId) {
+  if (!taskId || state.activeDownloadTask?.id === taskId) {
+    state.activeDownloadTask = null;
+  }
+}
+
+function showDownloadBusyToast() {
+  showToast(`当前正在下载: ${getActiveDownloadName()}，请完成后再下载下一首`, 'warning');
 }
 
 function getReadableError(err) {
@@ -476,7 +565,26 @@ function showInPageSaveAction({ actionEl, blob, filename, statusText }) {
   });
 }
 
-function showBrowserDownloadAction({ actionEl, downloadUrl, filename, statusText }) {
+function showReleaseDownloadAction({ actionEl, taskId, statusText }) {
+  if (!actionEl) return;
+
+  const button = document.createElement('button');
+  button.className = 'queue-save-btn secondary';
+  button.type = 'button';
+  button.textContent = '下载完成，允许下一首';
+  actionEl.innerHTML = '';
+  actionEl.appendChild(button);
+
+  button.addEventListener('click', () => {
+    releaseDownloadTask(taskId);
+    button.disabled = true;
+    statusText.innerText = '已允许下载下一首';
+    statusText.className = 'queue-status completed';
+    showToast('可以开始下一首下载了', 'success');
+  });
+}
+
+function showBrowserDownloadAction({ actionEl, downloadUrl, filename, statusText, taskId }) {
   if (!actionEl) return;
 
   const button = document.createElement('button');
@@ -488,8 +596,9 @@ function showBrowserDownloadAction({ actionEl, downloadUrl, filename, statusText
 
   button.addEventListener('click', () => {
     triggerBrowserDownload(downloadUrl, filename);
-    statusText.innerText = '已交给浏览器下载，请查看下载列表';
+    statusText.innerText = '已交给浏览器下载，完成后请允许下一首';
     statusText.className = 'queue-status completed';
+    showReleaseDownloadAction({ actionEl, taskId, statusText });
   });
 }
 
@@ -840,7 +949,7 @@ async function resolveWithScripts(song, quality, statusText, validateResolution)
 
 async function buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText) {
   const sourceName = getResolverName(resolution.successfulUrl);
-  statusText.innerText = `[${sourceName}] 正在准备下载...`;
+  statusText.innerText = `[${sourceName}] 正在准备带封面和歌手信息的下载...`;
 
   const mediaInfo = getDownloadMediaInfo('', quality, resolution.resolvedQuality, resolution.audioUrl);
   const finalExt = mediaInfo.actualExt || getDefaultExtensionForQuality(mediaInfo.actualQuality || quality);
@@ -896,6 +1005,51 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
   }
 
   throw lastError || new Error('所有平台均解析失败');
+}
+
+async function createShareLink(song) {
+  const defaultExt = getDefaultExtensionForQuality('128k');
+  const displayFilename = buildSongFilename(song, defaultExt);
+  const statusText = {
+    set innerText(val) {
+      console.log('[Share Resolution]', val);
+    }
+  };
+  const { downloadUrl, resolution, finalFilename } = await createDownloadLinkWithFallback(song, '128k', displayFilename, statusText);
+  const resolvedSong = resolution.resolvedSong || song;
+  const coverUrl = await getBestCoverUrl(resolvedSong);
+  let lyrics = [];
+  try {
+    lyrics = await fetchLyrics(resolvedSong);
+  } catch (err) {
+    console.warn('[Share] lyric preload failed:', err);
+  }
+
+  return buildSharePageUrl({
+    song: {
+      name: resolvedSong.name || song.name || '',
+      singer: resolvedSong.singer || song.singer || '',
+      albumName: resolvedSong.albumName || song.albumName || '',
+      albumId: resolvedSong.albumId || song.albumId || '',
+      interval: resolvedSong.interval || song.interval || '',
+      source: resolvedSong.source || song.source || '',
+      songmid: resolvedSong.songmid || song.songmid || '',
+      songId: resolvedSong.songId || song.songId || '',
+      hash: resolvedSong.hash || song.hash || '',
+      copyrightId: resolvedSong.copyrightId || song.copyrightId || '',
+      lrcUrl: resolvedSong.lrcUrl || song.lrcUrl || '',
+      mrcUrl: resolvedSong.mrcUrl || song.mrcUrl || '',
+      trcUrl: resolvedSong.trcUrl || song.trcUrl || '',
+      img: resolvedSong.img || song.img || '',
+      strMediaMid: resolvedSong.strMediaMid || song.strMediaMid || '',
+      albumMid: resolvedSong.albumMid || song.albumMid || '',
+      cover: coverUrl || '',
+    },
+    audioUrl: toAbsoluteUrl(`${downloadUrl}&play=1`),
+    downloadUrl: toAbsoluteUrl(downloadUrl),
+    filename: finalFilename || displayFilename,
+    lyrics: Array.isArray(lyrics) ? lyrics.slice(0, 180) : [],
+  });
 }
 
 async function getBestCoverUrl(song) {
@@ -1163,7 +1317,7 @@ function clearSearchInput() {
 
 function blurInteractiveTarget(e) {
   if (e.target?.closest?.('#clearSearchBtn')) return;
-  const target = e.target?.closest?.('button, .custom-select-trigger, .custom-option, .song-btn, .quality-btn, .download-progress-wrapper, .modal-close-btn');
+  const target = e.target?.closest?.('button, .custom-select-trigger, .custom-option, .song-btn, .quality-btn, .download-progress-wrapper, .song-secondary-actions, .modal-close-btn');
   if (!target) return;
   requestAnimationFrame(() => {
     target.blur?.();
@@ -1495,14 +1649,27 @@ function appendSearchResults(songs) {
             </svg>
           </button>
         </div>
-        <div class="download-progress-wrapper" data-songmid="${song.songmid}" data-source="${song.source}">
-          <svg class="progress-ring" width="36" height="36">
-            <circle class="progress-ring__track" stroke-dasharray="103.67" stroke-width="2.5" fill="transparent" r="16.5" cx="18" cy="18"/>
-            <circle class="progress-ring__circle" stroke-dasharray="103.67" stroke-width="2.5" fill="transparent" r="16.5" cx="18" cy="18"/>
-          </svg>
-          <button class="song-btn download-btn" title="下载">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+        <div class="song-secondary-actions">
+          <div class="download-progress-wrapper" data-songmid="${song.songmid}" data-source="${song.source}">
+            <svg class="progress-ring" width="36" height="36">
+              <circle class="progress-ring__track" stroke-dasharray="103.67" stroke-width="2.5" fill="transparent" r="16.5" cx="18" cy="18"/>
+              <circle class="progress-ring__circle" stroke-dasharray="103.67" stroke-width="2.5" fill="transparent" r="16.5" cx="18" cy="18"/>
+            </svg>
+            <button class="song-btn download-btn" title="下载">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+              </svg>
+            </button>
+          </div>
+          <button class="song-btn share-btn" type="button" title="分享">
+            <svg class="share-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="18" cy="5" r="3"/>
+              <circle cx="6" cy="12" r="3"/>
+              <circle cx="18" cy="19" r="3"/>
+              <path d="M8.59 13.51l6.83 3.98M15.41 6.51 8.59 10.49"/>
+            </svg>
+            <svg class="share-loading-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display: none;">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
             </svg>
           </button>
         </div>
@@ -1513,6 +1680,35 @@ function appendSearchResults(songs) {
       e.stopPropagation();
       if (e.currentTarget.classList.contains('downloading')) return;
       openDownloadModal(song);
+    });
+
+    item.querySelector('.share-btn').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const btn = e.currentTarget;
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.classList.add('loading');
+      btn.querySelector('.share-icon').style.display = 'none';
+      btn.querySelector('.share-loading-icon').style.display = 'block';
+      try {
+        const shareUrl = await createShareLink(song);
+        try {
+          await copyTextToClipboard(shareUrl);
+          showToast('分享链接已复制', 'success');
+        } catch (copyErr) {
+          console.warn('[Share Copy Error]', copyErr);
+          showShareLinkModal(shareUrl);
+          showToast('分享链接已生成，请手动复制', 'warning');
+        }
+      } catch (err) {
+        console.error('[Share Error]', err);
+        showToast(`分享失败: ${err.message}`, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove('loading');
+        btn.querySelector('.share-icon').style.display = 'block';
+        btn.querySelector('.share-loading-icon').style.display = 'none';
+      }
     });
 
     const setSongItemExpanded = ({ toggle = false } = {}) => {
@@ -1558,7 +1754,7 @@ function appendSearchResults(songs) {
 
     // Expand / Collapse card click handler
     item.addEventListener('click', (e) => {
-      if (e.target.closest('button') || e.target.closest('.download-progress-wrapper') || e.target.closest('.play-progress-wrapper') || e.target.closest('.player-progress-container') || e.target.closest('.player-lyric-container')) {
+      if (e.target.closest('button') || e.target.closest('.download-progress-wrapper') || e.target.closest('.song-secondary-actions') || e.target.closest('.play-progress-wrapper') || e.target.closest('.player-progress-container') || e.target.closest('.player-lyric-container')) {
         return;
       }
 
@@ -1665,6 +1861,11 @@ async function lazyLoadCover(song, imgEl, placeholderEl, idx) {
 
 // Download Tasks
 function openDownloadModal(song) {
+  if (isDownloadBusy()) {
+    showDownloadBusyToast();
+    return;
+  }
+
   songToDownload = song;
   el.modalSongName.innerText = `${song.singer} - ${song.name}`;
   
@@ -1696,10 +1897,16 @@ function openDownloadModal(song) {
 }
 
 async function startDownloadTask(song, quality) {
+  if (isDownloadBusy()) {
+    showDownloadBusyToast();
+    return;
+  }
+
   const selectedQuality = normalizeQualityType(quality) || quality;
   const defaultExt = getDefaultExtensionForQuality(selectedQuality);
   const displayFilename = buildSongFilename(song, defaultExt);
   const taskId = Date.now().toString();
+  lockDownloadTask(taskId, song);
 
   // Create UI list item
   const taskEl = document.createElement('div');
@@ -1767,12 +1974,14 @@ async function startDownloadTask(song, quality) {
       pctText.innerText = '待处理';
       updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
       showToast('微信内无法直接下载，请在系统浏览器打开', 'warning');
+      releaseDownloadTask(taskId);
       return;
     }
 
     if (useInPageDownload) {
       try {
         await downloadInsidePage(downloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song);
+        releaseDownloadTask(taskId);
         if (isQualityChanged) {
           showToast(`文件已生成: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
         } else if (usedFallback) {
@@ -1789,7 +1998,7 @@ async function startDownloadTask(song, quality) {
         progressFill.style.width = '100%';
         pctText.innerText = '待处理';
         updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
-        showBrowserDownloadAction({ actionEl, downloadUrl, filename: finalFilename, statusText });
+        showBrowserDownloadAction({ actionEl, downloadUrl, filename: finalFilename, statusText, taskId });
         showToast('网页内下载中断，请点击“用浏览器下载”继续', 'warning');
       }
       return;
@@ -1803,6 +2012,7 @@ async function startDownloadTask(song, quality) {
     progressFill.style.width = '100%';
     pctText.innerText = '已创建';
     updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
+    showReleaseDownloadAction({ actionEl, taskId, statusText });
     
     if (isQualityChanged) {
       showToast(`已创建下载任务: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
@@ -1814,6 +2024,7 @@ async function startDownloadTask(song, quality) {
 
   } catch (err) {
     console.error('[Download Task Error]', err);
+    releaseDownloadTask(taskId);
     showToast(`下载失败: ${song.name} (${err.message})`, 'error');
     updateDownloadProgressOnCard(song.songmid, song.source, 0, true);
     
@@ -1997,7 +2208,7 @@ function triggerLyricScrollSync() {
 function getLyricTextFromPayload(payload) {
   if (!payload) return '';
   const data = payload.data || payload;
-  return data.lyric || data.lrc || data.rawLrc || data.lxlyric || data.text || '';
+  return data.lxlyric || data.lyric || data.lrc || data.rawLrc || data.text || '';
 }
 
 // Fetch lyrics with native sandbox first, falling back to platform APIs.
@@ -2048,12 +2259,55 @@ function parseLrc(lrcText) {
   const lines = lrcText.split('\n');
   const parsed = [];
   const timeReg = /\[(\d+):(\d+)(?:\.(\d+))?\]/g;
+  const wordTimeReg = /<(-?\d+),(-?\d+)(?:,-?\d+)?>/g;
+  const parenWordTimeReg = /\((-?\d+),(-?\d+)(?:,-?\d+)?\)/g;
+  const parseWordTimings = (rawText) => {
+    const tagReg = rawText.includes('<') ? wordTimeReg : parenWordTimeReg;
+    const words = [];
+    let match;
+    let lastIndex = 0;
+    let currentTiming = null;
+    tagReg.lastIndex = 0;
+
+    while ((match = tagReg.exec(rawText)) !== null) {
+      const segment = rawText.slice(lastIndex, match.index);
+      if (currentTiming && segment) {
+        words.push({
+          text: segment,
+          start: Math.max(0, Number(currentTiming.start) / 1000),
+          duration: Math.max(0.08, Number(currentTiming.duration) / 1000),
+        });
+      } else if (segment.replace(/\s/g, '')) {
+        words.push({ text: segment, start: 0, duration: 0 });
+      }
+      currentTiming = {
+        start: parseInt(match[1], 10),
+        duration: parseInt(match[2], 10),
+      };
+      lastIndex = tagReg.lastIndex;
+    }
+
+    const tail = rawText.slice(lastIndex);
+    if (currentTiming && tail) {
+      words.push({
+        text: tail,
+        start: Math.max(0, Number(currentTiming.start) / 1000),
+        duration: Math.max(0.08, Number(currentTiming.duration) / 1000),
+      });
+    } else if (tail.replace(/\s/g, '')) {
+      words.push({ text: tail, start: 0, duration: 0 });
+    }
+
+    return words.filter(word => word.text);
+  };
   for (const line of lines) {
+    const rawText = line.replace(timeReg, '').trim();
     const text = line
       .replace(timeReg, '')
-      .replace(/<(-?\d+),(-?\d+)(?:,-?\d+)?>/g, '')
-      .replace(/\((\d+),(\d+)\)/g, '')
+      .replace(wordTimeReg, '')
+      .replace(parenWordTimeReg, '')
       .trim();
+    const words = parseWordTimings(rawText);
     let match;
     timeReg.lastIndex = 0;
     while ((match = timeReg.exec(line)) !== null) {
@@ -2061,7 +2315,7 @@ function parseLrc(lrcText) {
       const sec = parseInt(match[2], 10);
       const ms = match[3] ? parseInt(match[3].slice(0, 3).padEnd(3, '0'), 10) : 0;
       const time = min * 60 + sec + ms / 1000;
-      parsed.push({ time, text });
+      parsed.push({ time, text, words });
     }
   }
   return parsed.sort((a, b) => a.time - b.time);
