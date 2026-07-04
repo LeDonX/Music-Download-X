@@ -2544,6 +2544,7 @@ function updateDownloadProgressOnCard(songmid, source, pct, isError = false, isS
 
 // Global Audio Player Setup
 const audio = new Audio();
+const USER_GESTURE_UNLOCK_AUDIO_SRC = 'data:audio/wav;base64,UklGRmQBAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
 let activeSongId = null;
 let loadingSongId = null;
 let activePlayBtn = null;
@@ -2556,6 +2557,47 @@ let activeLyrics = [];
 let lastLyricIndex = -1;
 let isUserSeeking = false;
 let activePlaybackContext = null;
+let playbackGestureUnlocked = false;
+let isUnlockingPlaybackGesture = false;
+
+function unlockPlaybackFromUserGesture() {
+  if (playbackGestureUnlocked) return;
+  try {
+    const previousVolume = audio.volume;
+    const unlockSrc = USER_GESTURE_UNLOCK_AUDIO_SRC;
+    isUnlockingPlaybackGesture = true;
+    audio.volume = 0;
+    audio.src = unlockSrc;
+    audio.load();
+    const playPromise = audio.play();
+    if (playPromise?.then) {
+      playPromise.then(() => {
+        if (audio.currentSrc === unlockSrc || audio.src === unlockSrc) {
+          audio.pause();
+          audio.currentTime = 0;
+        }
+        audio.volume = previousVolume;
+        playbackGestureUnlocked = true;
+        isUnlockingPlaybackGesture = false;
+      }).catch((err) => {
+        audio.volume = previousVolume;
+        isUnlockingPlaybackGesture = false;
+        console.warn('[Playback] mobile audio unlock failed:', err.message || err);
+      });
+    } else {
+      if (audio.currentSrc === unlockSrc || audio.src === unlockSrc) {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+      audio.volume = previousVolume;
+      playbackGestureUnlocked = true;
+      isUnlockingPlaybackGesture = false;
+    }
+  } catch (err) {
+    isUnlockingPlaybackGesture = false;
+    console.warn('[Playback] mobile audio unlock failed:', err.message || err);
+  }
+}
 
 function getSongItemByKey(songKey) {
   return Array.from(document.querySelectorAll('.song-item')).find(item => item.dataset.songKey === songKey) || null;
@@ -2785,6 +2827,7 @@ function restorePlaybackStateSnapshot() {
 }
 
 audio.addEventListener('timeupdate', () => {
+  if (isUnlockingPlaybackGesture) return;
   if (activeSongId && activeProgressSlider && activeCurrentTimeText && !isUserSeeking) {
     const pct = (audio.currentTime / audio.duration) * 100 || 0;
     activeProgressSlider.value = pct;
@@ -2812,6 +2855,7 @@ audio.addEventListener('timeupdate', () => {
 });
 
 audio.addEventListener('loadedmetadata', () => {
+  if (isUnlockingPlaybackGesture) return;
   if (activeSongId && activeTotalTimeText) {
     activeTotalTimeText.innerText = formatTime(audio.duration);
   }
@@ -2822,6 +2866,7 @@ audio.addEventListener('loadedmetadata', () => {
 });
 
 audio.addEventListener('playing', () => {
+  if (isUnlockingPlaybackGesture) return;
   if (activePlayBtn) {
     activePlayBtn.querySelector('.play-icon').style.display = 'none';
     activePlayBtn.querySelector('.pause-icon').style.display = 'block';
@@ -2836,6 +2881,7 @@ audio.addEventListener('playing', () => {
 });
 
 audio.addEventListener('pause', () => {
+  if (isUnlockingPlaybackGesture) return;
   if (activePlayBtn) {
     activePlayBtn.querySelector('.play-icon').style.display = 'block';
     activePlayBtn.querySelector('.pause-icon').style.display = 'none';
@@ -2849,6 +2895,7 @@ audio.addEventListener('pause', () => {
 });
 
 audio.addEventListener('ended', () => {
+  if (isUnlockingPlaybackGesture) return;
   if (activePlayBtn) {
     activePlayBtn.querySelector('.play-icon').style.display = 'block';
     activePlayBtn.querySelector('.pause-icon').style.display = 'none';
@@ -2866,6 +2913,7 @@ audio.addEventListener('ended', () => {
 });
 
 audio.addEventListener('error', () => {
+  if (isUnlockingPlaybackGesture) return;
   if (activeSongId) {
     console.error('[Audio Error]', audio.error);
     showToast('播放出错，无法加载音频流', 'error');
@@ -3069,6 +3117,7 @@ async function togglePlay(song, itemEl) {
   // Set new loading state
   loadingSongId = songKey;
   playWrapper.classList.add('loading');
+  unlockPlaybackFromUserGesture();
 
   const dummyStatusText = {
     set innerText(val) {
@@ -3141,6 +3190,7 @@ async function togglePlay(song, itemEl) {
     slider.value = 0;
     if (activeLyricLineEl) activeLyricLineEl.innerText = '歌词加载中...';
 
+    audio.volume = 1;
     audio.src = activePlaybackContext.audioUrl;
     fetchLyrics(playbackSong).then((parsedLyrics) => {
       if (activeSongId !== songKey) return;
