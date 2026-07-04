@@ -1,3 +1,7 @@
+const SEARCH_STATE_STORAGE_KEY = 'music_download_x_search_state';
+const PLAYBACK_STATE_STORAGE_KEY = 'music_download_x_playback_state';
+let skipPlaybackStateSave = false;
+
 function getSharePayload() {
   const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : '';
   const params = new URLSearchParams(hash || window.location.search);
@@ -29,6 +33,49 @@ function startDownload(url, filename) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+}
+
+function isSearchEntry(payload) {
+  return payload?.entry === 'search';
+}
+
+function goBackToSearchOrHome() {
+  if (window.history.length > 1) {
+    window.history.back();
+    return;
+  }
+  window.location.href = '/';
+}
+
+function setupReturnButtons(payload) {
+  const isFromSearch = isSearchEntry(payload);
+  const label = isFromSearch ? '返回搜索结果' : '回到主页';
+  const backBtn = document.getElementById('shareBackBtn');
+  const homeBtn = document.getElementById('shareHomeBtn');
+  const backHandler = () => {
+    if (isFromSearch) {
+      goBackToSearchOrHome();
+    } else {
+      window.location.href = '/';
+    }
+  };
+
+  if (backBtn) {
+    backBtn.title = label;
+    backBtn.setAttribute('aria-label', label);
+    backBtn.addEventListener('click', backHandler);
+  }
+
+  if (homeBtn) {
+    homeBtn.title = '回到主页';
+    homeBtn.setAttribute('aria-label', '回到主页');
+    homeBtn.addEventListener('click', () => {
+      skipPlaybackStateSave = true;
+      sessionStorage.removeItem(SEARCH_STATE_STORAGE_KEY);
+      sessionStorage.removeItem(PLAYBACK_STATE_STORAGE_KEY);
+      window.location.href = '/';
+    });
+  }
 }
 
 function getImageProxyUrl(url) {
@@ -620,7 +667,6 @@ function init() {
   const payload = getSharePayload();
   const playBtn = document.getElementById('sharePlayBtn');
   const downloadBtn = document.getElementById('shareDownloadBtn');
-  const homeBtn = document.getElementById('shareHomeBtn');
   const cover = document.getElementById('shareCover');
   const bgCover = document.getElementById('shareBgCover');
   const coverPlaceholder = document.getElementById('shareCoverPlaceholder');
@@ -635,11 +681,11 @@ function init() {
     if (playBtn) playBtn.disabled = true;
     if (downloadBtn) downloadBtn.disabled = true;
     if (hint) hint.textContent = '链接缺少播放信息。';
-    homeBtn?.addEventListener('click', () => {
-      window.location.href = '/';
-    });
+    setupReturnButtons(payload);
     return;
   }
+
+  setupReturnButtons(payload);
 
   const song = payload.song || {};
   setText('shareTitle', song.name || '未知歌曲');
@@ -677,9 +723,33 @@ function init() {
 
   let lyrics = [];
   const audio = new Audio(payload.audioUrl);
+  const initialTime = Math.max(0, Number(payload.currentTime || 0));
+  let initialSeekPending = initialTime > 0;
   let activeIndex = -1;
   let isSeeking = false;
   let lyricFrameId = 0;
+
+  const savePlaybackState = () => {
+    if (skipPlaybackStateSave) return;
+    if (!isSearchEntry(payload)) return;
+    try {
+      sessionStorage.setItem(PLAYBACK_STATE_STORAGE_KEY, JSON.stringify({
+        savedAt: Date.now(),
+        songKey: payload.songKey || '',
+        song,
+        audioUrl: payload.audioUrl,
+        downloadUrl: payload.downloadUrl || '',
+        filename: payload.filename || '',
+        lyrics: Array.isArray(lyrics) ? lyrics.slice(0, 220) : [],
+        currentTime: Number.isFinite(audio.currentTime) ? audio.currentTime : initialTime,
+        duration: Number.isFinite(audio.duration) ? audio.duration : Number(payload.duration || 0),
+        paused: audio.paused,
+        ended: audio.ended,
+      }));
+    } catch (err) {
+      console.warn('[Share] failed to save playback state', err);
+    }
+  };
 
   function syncLyricsToTime(time, duration) {
     if (!lyrics.length) return;
@@ -737,8 +807,22 @@ function init() {
   }
 
   audio.addEventListener('loadedmetadata', () => {
+    if (initialSeekPending) {
+      initialSeekPending = false;
+      try {
+        const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+        audio.currentTime = duration ? Math.min(initialTime, Math.max(0, duration - 0.2)) : initialTime;
+      } catch (err) {
+        console.warn('[Share] failed to restore playback time', err);
+      }
+    }
     updateProgressUI(audio, progressSlider, currentTimeEl, durationEl);
     syncLyricsToTime(audio.currentTime, audio.duration);
+    if (payload.autoplay) {
+      audio.play().catch((err) => {
+        if (hint) hint.textContent = `播放失败: ${err.message}`;
+      });
+    }
   });
 
   audio.addEventListener('timeupdate', () => {
@@ -812,9 +896,7 @@ function init() {
     startDownload(payload.downloadUrl || payload.audioUrl, payload.filename || `${song.singer || 'music'} - ${song.name || 'song'}`);
   });
 
-  homeBtn?.addEventListener('click', () => {
-    window.location.href = '/';
-  });
+  window.addEventListener('pagehide', savePlaybackState);
 }
 
 window.addEventListener('DOMContentLoaded', init);

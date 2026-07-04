@@ -31,6 +31,9 @@ const SUSPICIOUS_DURATION_GAP_SECONDS = 20;
 const SUSPICIOUS_TINY_AUDIO_BYTES = 512 * 1024;
 const SUSPICIOUS_TINY_MIN_EXPECTED_SECONDS = 45;
 const ORDERED_QUALITIES = new Set(['128k', '320k', 'flac', 'flac24bit']);
+const SEARCH_STATE_STORAGE_KEY = 'music_download_x_search_state';
+const PLAYBACK_STATE_STORAGE_KEY = 'music_download_x_playback_state';
+const SEARCH_STATE_MAX_AGE_MS = 30 * 60 * 1000;
 
 // Application State
 const state = {
@@ -291,6 +294,189 @@ function getImageProxyUrl(url) {
   return `/api/image?url=${encodeURIComponent(url)}`;
 }
 
+function getSongCoverUrl(song) {
+  const coverUrl = song?.cover || song?.img || '';
+  return /^https?:\/\//i.test(coverUrl) ? coverUrl : '';
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function rgbToCss(rgb) {
+  return rgb.map(value => Math.round(clamp(value, 0, 255))).join(', ');
+}
+
+function rgbToHsl([r, g, b]) {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0;
+  let s = 0;
+  const l = (max + min) / 2;
+
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r:
+        h = (g - b) / d + (g < b ? 6 : 0);
+        break;
+      case g:
+        h = (b - r) / d + 2;
+        break;
+      default:
+        h = (r - g) / d + 4;
+        break;
+    }
+    h /= 6;
+  }
+
+  return [h, s, l];
+}
+
+function hslToRgb([h, s, l]) {
+  if (s === 0) {
+    const value = l * 255;
+    return [value, value, value];
+  }
+
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return [
+    hue2rgb(p, q, h + 1 / 3) * 255,
+    hue2rgb(p, q, h) * 255,
+    hue2rgb(p, q, h - 1 / 3) * 255,
+  ];
+}
+
+function buildThemeFromColor(rgb) {
+  const [h, s, l] = rgbToHsl(rgb);
+  const saturation = clamp(s, 0.28, 0.78);
+
+  return {
+    main: hslToRgb([h, saturation, clamp(l, 0.32, 0.46)]),
+    dark: hslToRgb([h, clamp(saturation * 0.86, 0.22, 0.64), 0.08]),
+    soft: hslToRgb([h, clamp(saturation * 0.92, 0.38, 0.82), 0.68]),
+  };
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('封面图片加载失败'));
+    img.src = src;
+  });
+}
+
+function getDominantColorFromImage(img) {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('当前浏览器不支持封面取色');
+
+  ctx.drawImage(img, 0, 0, size, size);
+  const { data } = ctx.getImageData(0, 0, size, size);
+  const buckets = new Map();
+  let fallback = [0, 0, 0];
+  let fallbackWeight = 0;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const alpha = data[i + 3];
+    if (alpha < 180) continue;
+
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const lightness = (max + min) / 2;
+    const saturation = max === 0 ? 0 : (max - min) / max;
+
+    if (lightness < 10 || lightness > 246) continue;
+
+    const fallbackScore = 1 + saturation;
+    fallback[0] += r * fallbackScore;
+    fallback[1] += g * fallbackScore;
+    fallback[2] += b * fallbackScore;
+    fallbackWeight += fallbackScore;
+
+    if (saturation < 0.08 || lightness < 28 || lightness > 232) continue;
+
+    const key = `${r >> 4},${g >> 4},${b >> 4}`;
+    const vividness = saturation * 1.7;
+    const midTone = 1 - Math.min(1, Math.abs(lightness - 128) / 128);
+    const score = 1 + vividness + midTone;
+    const bucket = buckets.get(key) || { r: 0, g: 0, b: 0, weight: 0, count: 0 };
+    bucket.r += r * score;
+    bucket.g += g * score;
+    bucket.b += b * score;
+    bucket.weight += score;
+    bucket.count += 1;
+    buckets.set(key, bucket);
+  }
+
+  let best = null;
+  for (const bucket of buckets.values()) {
+    if (!best || bucket.weight > best.weight) best = bucket;
+  }
+
+  if (best?.weight) return [best.r / best.weight, best.g / best.weight, best.b / best.weight];
+  if (fallbackWeight) return fallback.map(value => value / fallbackWeight);
+  throw new Error('封面没有可用于取色的像素');
+}
+
+function applyThemeToInlinePlayer(theme) {
+  if (!inlinePlayer.root) return;
+  const page = inlinePlayer.root.querySelector('.share-page');
+  for (const target of [inlinePlayer.root, page].filter(Boolean)) {
+    target.style.setProperty('--share-theme-rgb', rgbToCss(theme.main));
+    target.style.setProperty('--share-theme-dark-rgb', rgbToCss(theme.dark));
+    target.style.setProperty('--share-theme-soft-rgb', rgbToCss(theme.soft));
+  }
+}
+
+function clearInlinePlayerTheme() {
+  if (!inlinePlayer.root) return;
+  const page = inlinePlayer.root.querySelector('.share-page');
+  for (const target of [inlinePlayer.root, page].filter(Boolean)) {
+    target.style.removeProperty('--share-theme-rgb');
+    target.style.removeProperty('--share-theme-dark-rgb');
+    target.style.removeProperty('--share-theme-soft-rgb');
+  }
+}
+
+async function applyInlineThemeFromCover(coverUrl, metadataToken = inlinePlayer.metadataToken) {
+  const proxyUrl = getImageProxyUrl(coverUrl);
+  if (!proxyUrl) return;
+
+  try {
+    const img = await loadImage(proxyUrl);
+    if (metadataToken !== inlinePlayer.metadataToken) return;
+    const dominantColor = getDominantColorFromImage(img);
+    if (metadataToken !== inlinePlayer.metadataToken) return;
+    applyThemeToInlinePlayer(buildThemeFromColor(dominantColor));
+  } catch (err) {
+    console.warn('[Inline Player] cover theme extraction failed:', err);
+  }
+}
+
 function isWeChatBrowser() {
   return /MicroMessenger/i.test(navigator.userAgent || '');
 }
@@ -324,6 +510,121 @@ function buildSharePageUrl(payload) {
     data: btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''),
   }).toString();
   return pageUrl.toString();
+}
+
+function getSearchScrollTop() {
+  return Math.max(
+    window.scrollY || 0,
+    document.documentElement.scrollTop || 0,
+    document.body.scrollTop || 0
+  );
+}
+
+function saveSearchStateSnapshot() {
+  try {
+    sessionStorage.setItem(SEARCH_STATE_STORAGE_KEY, JSON.stringify({
+      savedAt: Date.now(),
+      currentSource: state.currentSource,
+      currentKeyword: state.currentKeyword || el.searchInput.value.trim(),
+      currentResults: state.currentResults,
+      currentPage: state.currentPage,
+      totalCount: state.totalCount,
+      activeSearchKey: state.activeSearchKey,
+      scrollTop: getSearchScrollTop(),
+    }));
+  } catch (err) {
+    console.warn('[App] failed to save search state', err);
+  }
+}
+
+function getFiniteSeconds(value) {
+  const seconds = Number(value || 0);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+function setSelectedPlatformUI(source) {
+  const value = source || 'tx';
+  const options = el.customSelect?.querySelectorAll('.custom-option') || [];
+  let selectedText = PLATFORM_NAMES[value] || value;
+
+  options.forEach(option => {
+    const isActive = option.getAttribute('data-value') === value;
+    option.classList.toggle('active', isActive);
+    if (isActive) selectedText = option.innerText;
+  });
+
+  state.currentSource = value;
+  el.selectedPlatform.innerText = selectedText;
+}
+
+function restoreSearchStateSnapshot() {
+  let snapshot = null;
+  try {
+    const raw = sessionStorage.getItem(SEARCH_STATE_STORAGE_KEY);
+    if (!raw) return false;
+    snapshot = JSON.parse(raw);
+    sessionStorage.removeItem(SEARCH_STATE_STORAGE_KEY);
+  } catch (err) {
+    console.warn('[App] failed to restore search state', err);
+    return false;
+  }
+
+  if (!snapshot || Date.now() - Number(snapshot.savedAt || 0) > SEARCH_STATE_MAX_AGE_MS) {
+    return false;
+  }
+
+  const restoredResults = Array.isArray(snapshot.currentResults) ? snapshot.currentResults : [];
+  const restoredKeyword = String(snapshot.currentKeyword || '');
+
+  setSelectedPlatformUI(snapshot.currentSource || 'tx');
+  state.currentKeyword = restoredKeyword;
+  state.currentResults = restoredResults;
+  state.currentPage = Number(snapshot.currentPage || 1);
+  state.totalCount = Number(snapshot.totalCount || restoredResults.length || 0);
+  state.activeSearchKey = snapshot.activeSearchKey || getSearchKey(restoredKeyword, state.currentSource);
+  state.isLoading = false;
+  state.loadingMode = '';
+  state.searchAbortController = null;
+  el.searchInput.value = restoredKeyword;
+  updateClearSearchButton();
+  showBottomLoadingIndicator(false);
+
+  if (restoredKeyword && restoredResults.length) {
+    renderSearchResults();
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: Number(snapshot.scrollTop || 0), left: 0, behavior: 'auto' });
+    });
+    return true;
+  }
+
+  renderInitialEmptyState();
+  return false;
+}
+
+function savePlaybackStateSnapshot(snapshot) {
+  if (!snapshot?.audioUrl || !snapshot?.song) return;
+  try {
+    sessionStorage.setItem(PLAYBACK_STATE_STORAGE_KEY, JSON.stringify({
+      ...snapshot,
+      savedAt: Date.now(),
+    }));
+  } catch (err) {
+    console.warn('[App] failed to save playback state', err);
+  }
+}
+
+function readPlaybackStateSnapshot() {
+  try {
+    const raw = sessionStorage.getItem(PLAYBACK_STATE_STORAGE_KEY);
+    if (!raw) return null;
+    sessionStorage.removeItem(PLAYBACK_STATE_STORAGE_KEY);
+    const snapshot = JSON.parse(raw);
+    if (!snapshot || Date.now() - Number(snapshot.savedAt || 0) > SEARCH_STATE_MAX_AGE_MS) return null;
+    return snapshot;
+  } catch (err) {
+    console.warn('[App] failed to read playback state', err);
+    return null;
+  }
 }
 
 function buildHomePageUrl() {
@@ -657,7 +958,7 @@ function getActiveDownloadName() {
 }
 
 function isDownloadBusy() {
-  return Boolean(state.activeDownloadTask);
+  return false;
 }
 
 function lockDownloadTask(taskId, song) {
@@ -770,9 +1071,10 @@ function showBrowserDownloadAction({ actionEl, downloadUrl, filename, statusText
 
   button.addEventListener('click', () => {
     triggerBrowserDownload(downloadUrl, filename);
-    statusText.innerText = '已交给浏览器下载，完成后请允许下一首';
+    statusText.innerText = '已交给浏览器下载';
     statusText.className = 'queue-status completed';
-    showReleaseDownloadAction({ actionEl, taskId, statusText });
+    releaseDownloadTask(taskId);
+    actionEl.innerHTML = '';
   });
 }
 
@@ -1150,7 +1452,8 @@ function buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt
   return `/api/download?${params.toString()}`;
 }
 
-async function buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText) {
+async function buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText, options = {}) {
+  const { validate = true, includeCover = true } = options;
   const sourceName = getResolverName(resolution.successfulUrl);
 
   const mediaInfo = getDownloadMediaInfo('', quality, resolution.resolvedQuality, resolution.audioUrl);
@@ -1158,10 +1461,12 @@ async function buildDownloadUrlFromResolution(resolution, quality, filename, son
   const finalFilename = buildSongFilename(song, finalExt);
   const metadataSong = resolution.resolvedSong || song;
   const preliminaryDownloadUrl = buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt);
-  await validateResolvedDownload(preliminaryDownloadUrl, metadataSong, statusText, resolution);
+  if (validate) {
+    await validateResolvedDownload(preliminaryDownloadUrl, metadataSong, statusText, resolution);
+  }
 
   statusText.innerText = `[${sourceName}] 正在准备带封面和歌手信息的下载...`;
-  const coverUrl = await getBestCoverUrl(metadataSong);
+  const coverUrl = includeCover ? await getBestCoverUrl(metadataSong) : (metadataSong.img || '');
   const downloadUrl = buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt, coverUrl);
 
   return {
@@ -1172,13 +1477,13 @@ async function buildDownloadUrlFromResolution(resolution, quality, filename, son
   };
 }
 
-async function createDownloadLink(song, quality, filename, statusText) {
+async function createDownloadLink(song, quality, filename, statusText, options = {}) {
   return resolveWithScripts(song, quality, statusText, (resolution) => {
-    return buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText);
+    return buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText, options);
   });
 }
 
-async function createDownloadLinkWithFallback(song, quality, filename, statusText) {
+async function createDownloadLinkWithFallback(song, quality, filename, statusText, options = {}) {
   let lastError = null;
   let alternativesPromise = null;
 
@@ -1203,7 +1508,7 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
 
     try {
       return await resolveWithLoadedResolver(url, sandboxInstance, song, quality, statusText, (resolution) => {
-        return buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText);
+        return buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText, options);
       });
     } catch (err) {
       lastError = err;
@@ -1220,7 +1525,7 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
       try {
         statusText.innerText = `[${sourceName}] 正在尝试 ${getPlatformName(candidate.source)}...`;
         return await resolveWithLoadedResolver(url, sandboxInstance, candidate, quality, statusText, (resolution) => {
-          return buildDownloadUrlFromResolution(resolution, quality, filename, candidate, statusText);
+          return buildDownloadUrlFromResolution(resolution, quality, filename, candidate, statusText, options);
         });
       } catch (err) {
         lastError = err;
@@ -1232,7 +1537,7 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
   throw lastError || new Error('所有平台和解析服务均解析失败');
 }
 
-async function createShareLink(song) {
+async function createShareLink(song, options = {}) {
   const defaultExt = getDefaultExtensionForQuality('128k');
   const displayFilename = buildSongFilename(song, defaultExt);
   const statusText = {
@@ -1251,6 +1556,7 @@ async function createShareLink(song) {
   }
 
   return buildSharePageUrl({
+    entry: options.entry || 'share',
     song: {
       name: resolvedSong.name || song.name || '',
       singer: resolvedSong.singer || song.singer || '',
@@ -1277,9 +1583,21 @@ async function createShareLink(song) {
   });
 }
 
+async function openSharePlayerPage(song, button) {
+  if (button?.disabled) return;
+  try {
+    openInlinePlayerOverlay(song);
+  } catch (err) {
+    console.error('[Player Page Error]', err);
+    showToast(`进入播放界面失败: ${err.message}`, 'error');
+  }
+}
+
 async function getBestCoverUrl(song) {
-  if (song.img && /^https?:\/\//i.test(song.img)) {
-    return song.img;
+  const existingCoverUrl = getSongCoverUrl(song);
+  if (existingCoverUrl) {
+    song.img = song.img || existingCoverUrl;
+    return existingCoverUrl;
   }
 
   try {
@@ -1294,7 +1612,7 @@ async function getBestCoverUrl(song) {
   } catch (err) {
     console.warn('[Download] cover lookup failed:', err.message);
   }
-  return song.img && /^https?:\/\//i.test(song.img) ? song.img : '';
+  return getSongCoverUrl(song);
 }
 
 async function getOrLoadSandbox(url) {
@@ -1367,6 +1685,8 @@ async function init() {
 
   // Setup Event Listeners first so search/input elements are immediately active
   setupEventListeners();
+  restoreSearchStateSnapshot();
+  restorePlaybackStateSnapshot();
 
   // Load Custom Music Source in background
   await loadMusicSource(state.scriptUrl);
@@ -1489,16 +1809,27 @@ function setupEventListeners() {
   });
 
   // Select quality download
-  el.qualityBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      const quality = btn.getAttribute('data-quality');
-      if (songToDownload) {
-        startDownloadTask(songToDownload, quality);
-      }
-      el.qualityModal.classList.remove('active');
-      songToDownload = null;
-    });
-  });
+  const handleQualitySelect = (event) => {
+    const btn = event.target?.closest?.('.quality-btn');
+    if (!btn || !el.qualityModal.classList.contains('active')) return;
+    if (btn.disabled || btn.style.display === 'none') return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const quality = btn.getAttribute('data-quality');
+    const downloadSong = songToDownload;
+    songToDownload = null;
+    el.qualityModal.classList.remove('active');
+
+    if (downloadSong) {
+      void startDownloadTask(downloadSong, quality);
+    } else {
+      showToast('下载歌曲信息已失效，请重新点击下载', 'warning');
+    }
+  };
+  el.qualityModal.addEventListener('pointerdown', handleQualitySelect, true);
+  el.qualityModal.addEventListener('click', handleQualitySelect, true);
 }
 
 function updateClearSearchButton() {
@@ -1837,14 +2168,16 @@ function appendSearchResults(songs) {
     item.className = 'song-item';
     item.id = `song-item-${globalIdx}`;
     const songKey = getSongKey(song);
+    item.dataset.songKey = songKey;
 
     const hasCover = Boolean(song.img && /^https?:\/\//i.test(song.img));
 
     item.innerHTML = `
-      <div class="song-cover-wrapper">
-        <div class="song-cover-placeholder" style="${hasCover ? 'display:none;' : ''}">♪</div>
+      <button class="song-cover-wrapper song-cover-button" type="button" aria-label="歌曲封面">
+        <span class="song-cover-placeholder" style="${hasCover ? 'display:none;' : ''}">♪</span>
         <img class="song-cover" alt="Cover" style="${hasCover ? 'display:block;' : 'display:none;'}">
-      </div>
+        <span class="song-cover-entry-label" aria-hidden="true">进入播放页</span>
+      </button>
       <div class="song-info">
         <div class="song-title">${escapeHtml(song.name)}</div>
         <div class="song-artist">${escapeHtml(song.singer)}</div>
@@ -1905,6 +2238,15 @@ function appendSearchResults(songs) {
       e.stopPropagation();
       if (e.currentTarget.classList.contains('downloading')) return;
       openDownloadModal(song);
+    });
+
+    item.querySelector('.song-cover-button').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (isSongReadyForPlayerPage(song)) {
+        openSharePlayerPage(song, e.currentTarget);
+      } else {
+        setSongItemExpanded({ toggle: true });
+      }
     });
 
     item.querySelector('.share-btn').addEventListener('click', async (e) => {
@@ -2065,6 +2407,10 @@ function appendSearchResults(songs) {
     } else {
       lazyLoadCover(song, imgEl, placeholderEl, globalIdx);
     }
+
+    if (isSongReadyForPlayerPage(song)) {
+      setPlayerPageEntryReady(item, true);
+    }
   });
 }
 
@@ -2095,7 +2441,8 @@ function openDownloadModal(song) {
   el.modalSongName.innerText = `${song.singer} - ${song.name}`;
   
   // Show/hide quality options based on actual song capabilities and active sandbox support
-  const songQualities = (song.types || []).map(t => t.type);
+  const songTypes = song.types?.length ? song.types : [{ type: '128k', size: '1.2 MB' }];
+  const songQualities = songTypes.map(t => t.type);
   const activeSources = state.sandbox?.sources || {};
   const scriptSupportedQualities = activeSources[song.source]?.qualitys || [];
   
@@ -2109,7 +2456,7 @@ function openDownloadModal(song) {
     const sizeEl = btn.querySelector('.quality-size');
     if (supported.includes(q)) {
       btn.style.display = 'flex';
-      const typeInfo = song.types.find(t => t.type === q);
+      const typeInfo = songTypes.find(t => t.type === q);
       if (typeInfo && sizeEl) {
         sizeEl.innerText = `约 ${typeInfo.size}`;
       }
@@ -2237,7 +2584,7 @@ async function startDownloadTask(song, quality) {
     progressFill.style.width = '100%';
     pctText.innerText = '已创建';
     updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
-    showReleaseDownloadAction({ actionEl, taskId, statusText });
+    releaseDownloadTask(taskId);
     
     if (isQualityChanged) {
       showToast(`已创建下载任务: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
@@ -2343,6 +2690,704 @@ let activeLyricLineEl = null;
 let activeLyrics = [];
 let lastLyricIndex = -1;
 let isUserSeeking = false;
+let activePlaybackContext = null;
+
+function getSongItemByKey(songKey) {
+  return Array.from(document.querySelectorAll('.song-item')).find(item => item.dataset.songKey === songKey) || null;
+}
+
+function clearPlayerPageEntryReady() {
+  document.querySelectorAll('.song-item.player-page-entry-ready').forEach(item => {
+    item.classList.remove('player-page-entry-ready');
+    const coverButton = item.querySelector('.song-cover-button');
+    if (coverButton) {
+      coverButton.removeAttribute('title');
+      coverButton.setAttribute('aria-label', '歌曲封面');
+    }
+  });
+}
+
+function setPlayerPageEntryReady(itemEl, isReady) {
+  if (!itemEl) return;
+  if (isReady) {
+    clearPlayerPageEntryReady();
+    itemEl.classList.add('player-page-entry-ready');
+    const coverButton = itemEl.querySelector('.song-cover-button');
+    if (coverButton) {
+      coverButton.title = '进入播放页';
+      coverButton.setAttribute('aria-label', '进入播放页');
+    }
+  } else {
+    itemEl.classList.remove('player-page-entry-ready');
+  }
+}
+
+function isSongReadyForPlayerPage(song) {
+  return Boolean(
+    activeSongId &&
+    activeSongId === getSongKey(song) &&
+    activePlaybackContext?.audioUrl &&
+    !audio.ended
+  );
+}
+
+function createPlaybackStateSnapshot() {
+  if (!activePlaybackContext?.audioUrl || !activePlaybackContext?.song || !activeSongId) return null;
+  return {
+    songKey: activeSongId,
+    song: activePlaybackContext.song,
+    audioUrl: audio.currentSrc || activePlaybackContext.audioUrl,
+    downloadUrl: activePlaybackContext.downloadUrl || '',
+    filename: activePlaybackContext.filename || '',
+    lyrics: Array.isArray(activeLyrics) ? activeLyrics.slice(0, 220) : [],
+    currentTime: getFiniteSeconds(audio.currentTime),
+    duration: getFiniteSeconds(audio.duration),
+    paused: audio.paused,
+    ended: audio.ended,
+  };
+}
+
+function buildCurrentPlaybackPageUrl(song) {
+  if (!isSongReadyForPlayerPage(song)) {
+    throw new Error('请先播放成功后再进入播放页');
+  }
+
+  const snapshot = createPlaybackStateSnapshot();
+  if (!snapshot) throw new Error('当前播放信息不可用');
+
+  return buildSharePageUrl({
+    entry: 'search',
+    songKey: snapshot.songKey,
+    song: snapshot.song,
+    audioUrl: toAbsoluteUrl(snapshot.audioUrl),
+    downloadUrl: snapshot.downloadUrl ? toAbsoluteUrl(snapshot.downloadUrl) : toAbsoluteUrl(snapshot.audioUrl),
+    filename: snapshot.filename || buildSongFilename(snapshot.song, 'mp3'),
+    lyrics: snapshot.lyrics,
+    currentTime: snapshot.currentTime,
+    duration: snapshot.duration,
+    autoplay: !snapshot.paused && !snapshot.ended,
+  });
+}
+
+const inlinePlayer = {
+  root: null,
+  active: false,
+  isSeeking: false,
+  frameId: 0,
+  lyricIndex: -1,
+  metadataToken: 0,
+  els: {},
+};
+
+function ensureInlinePlayerOverlay() {
+  if (inlinePlayer.root) return inlinePlayer;
+
+  const root = document.createElement('div');
+  root.id = 'inlinePlayerOverlay';
+  root.className = 'inline-player-overlay';
+  root.setAttribute('aria-hidden', 'true');
+  root.innerHTML = `
+    <main class="share-page inline-player-page">
+      <img id="inlinePlayerBgCover" class="share-bg-cover" alt="" aria-hidden="true">
+      <div class="share-bg-layer" aria-hidden="true"></div>
+      <button id="inlinePlayerBackBtn" class="share-back-btn" type="button" title="返回搜索结果" aria-label="返回搜索结果">
+        <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <path d="M19 12H5"/>
+          <path d="m12 19-7-7 7-7"/>
+        </svg>
+      </button>
+
+      <section class="share-cover-stage" aria-label="歌曲封面">
+        <div class="share-cover-frame">
+          <div id="inlinePlayerCoverPlaceholder" class="share-cover-placeholder">♪</div>
+          <img id="inlinePlayerCover" class="share-cover" alt="歌曲封面">
+        </div>
+      </section>
+
+      <section class="share-player-panel" aria-label="播放界面">
+        <div class="share-song-info">
+          <h1 id="inlinePlayerTitle" class="share-title">歌曲</h1>
+          <div id="inlinePlayerArtist" class="share-artist">歌手</div>
+          <div id="inlinePlayerLyricList" class="share-lyric-list">
+            <div class="share-lyric-row previous"><span class="share-lyric-text"></span><span class="share-lyric-fill" aria-hidden="true"></span></div>
+            <div class="share-lyric-row active"><span class="share-lyric-text">歌词加载中...</span><span class="share-lyric-fill" aria-hidden="true">歌词加载中...</span></div>
+            <div class="share-lyric-row next"><span class="share-lyric-text"></span><span class="share-lyric-fill" aria-hidden="true"></span></div>
+          </div>
+        </div>
+
+        <div class="share-progress-wrap">
+          <div class="share-progress-times">
+            <span id="inlinePlayerCurrentTime">00:00</span>
+            <span id="inlinePlayerDuration">00:00</span>
+          </div>
+          <input id="inlinePlayerProgressSlider" class="share-progress-slider" type="range" min="0" max="100" value="0" step="0.1" aria-label="播放进度">
+        </div>
+        <div class="share-control-row">
+          <button id="inlinePlayerHomeBtn" class="share-panel-icon-btn" type="button" title="返回搜索结果" aria-label="返回搜索结果">
+            <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path d="M19 12H5"/>
+              <path d="m12 19-7-7 7-7"/>
+            </svg>
+          </button>
+          <button id="inlinePlayerPlayBtn" class="share-play-toggle" type="button" title="播放" aria-label="播放">
+            <svg class="share-play-icon" width="34" height="34" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M8 5v14l11-7z"/>
+            </svg>
+            <svg class="share-pause-icon" width="34" height="34" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+            </svg>
+          </button>
+          <button id="inlinePlayerDownloadBtn" class="share-panel-icon-btn" type="button" title="下载" aria-label="下载">
+            <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <path d="M7 10l5 5 5-5"/>
+              <path d="M12 15V3"/>
+            </svg>
+          </button>
+        </div>
+        <p id="inlinePlayerHint" class="share-hint"></p>
+      </section>
+    </main>
+  `;
+
+  document.body.appendChild(root);
+  inlinePlayer.root = root;
+  inlinePlayer.els = {
+    bgCover: root.querySelector('#inlinePlayerBgCover'),
+    cover: root.querySelector('#inlinePlayerCover'),
+    coverPlaceholder: root.querySelector('#inlinePlayerCoverPlaceholder'),
+    backBtn: root.querySelector('#inlinePlayerBackBtn'),
+    homeBtn: root.querySelector('#inlinePlayerHomeBtn'),
+    playBtn: root.querySelector('#inlinePlayerPlayBtn'),
+    downloadBtn: root.querySelector('#inlinePlayerDownloadBtn'),
+    title: root.querySelector('#inlinePlayerTitle'),
+    artist: root.querySelector('#inlinePlayerArtist'),
+    lyricList: root.querySelector('#inlinePlayerLyricList'),
+    slider: root.querySelector('#inlinePlayerProgressSlider'),
+    currentTime: root.querySelector('#inlinePlayerCurrentTime'),
+    duration: root.querySelector('#inlinePlayerDuration'),
+    hint: root.querySelector('#inlinePlayerHint'),
+  };
+
+  inlinePlayer.els.backBtn?.addEventListener('click', closeInlinePlayerOverlay);
+  inlinePlayer.els.homeBtn?.addEventListener('click', closeInlinePlayerOverlay);
+  inlinePlayer.els.playBtn?.addEventListener('click', async () => {
+    try {
+      if (audio.paused) {
+        await audio.play();
+      } else {
+        audio.pause();
+      }
+    } catch (err) {
+      if (inlinePlayer.els.hint) inlinePlayer.els.hint.textContent = `播放失败: ${err.message}`;
+    }
+  });
+  inlinePlayer.els.downloadBtn?.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!activePlaybackContext?.song) return;
+    openDownloadModal(activePlaybackContext.song);
+  });
+
+  inlinePlayer.els.slider?.addEventListener('input', () => {
+    inlinePlayer.isSeeking = true;
+    stopInlinePlayerFrame();
+    const percent = Number(inlinePlayer.els.slider.value || 0);
+    inlinePlayer.els.slider.style.setProperty('--share-progress', `${percent}%`);
+    const duration = getFiniteSeconds(audio.duration);
+    const seekTime = duration ? (percent / 100) * duration : 0;
+    if (inlinePlayer.els.currentTime && duration) inlinePlayer.els.currentTime.textContent = formatTime(seekTime);
+    syncInlinePlayerLyrics(seekTime, duration);
+  });
+
+  const commitInlineSeek = () => {
+    const duration = getFiniteSeconds(audio.duration);
+    if (duration) audio.currentTime = (Number(inlinePlayer.els.slider.value || 0) / 100) * duration;
+    inlinePlayer.isSeeking = false;
+    updateInlinePlayerProgress();
+    syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+    if (!audio.paused && !audio.ended) startInlinePlayerFrame();
+  };
+  inlinePlayer.els.slider?.addEventListener('change', commitInlineSeek);
+  inlinePlayer.els.slider?.addEventListener('pointerup', commitInlineSeek);
+  inlinePlayer.els.slider?.addEventListener('touchend', commitInlineSeek);
+  window.addEventListener('resize', () => {
+    if (inlinePlayer.active) syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+  });
+  window.visualViewport?.addEventListener('resize', () => {
+    if (inlinePlayer.active) syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+  });
+
+  return inlinePlayer;
+}
+
+function closeInlinePlayerOverlay() {
+  if (!inlinePlayer.root) return;
+  inlinePlayer.active = false;
+  inlinePlayer.isSeeking = false;
+  inlinePlayer.root.classList.remove('active');
+  inlinePlayer.root.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('inline-player-open');
+  stopInlinePlayerFrame();
+}
+
+function setInlinePlayerPlayState(isPlaying) {
+  inlinePlayer.els.playBtn?.classList.toggle('playing', Boolean(isPlaying));
+}
+
+function updateInlinePlayerMetadata() {
+  if (!inlinePlayer.root || !activePlaybackContext?.song) return;
+  const song = activePlaybackContext.song;
+  const metadataToken = ++inlinePlayer.metadataToken;
+  inlinePlayer.els.title.textContent = song.name || '未知歌曲';
+  inlinePlayer.els.artist.textContent = song.singer || '未知歌手';
+
+  const applyCover = (coverUrl) => {
+    if (metadataToken !== inlinePlayer.metadataToken) return;
+    if (!coverUrl || !/^https?:\/\//i.test(coverUrl)) return;
+
+    const proxiedCover = getImageProxyUrl(coverUrl);
+    const displayCover = proxiedCover || coverUrl;
+    song.cover = coverUrl;
+    song.img = song.img || coverUrl;
+
+    inlinePlayer.els.cover.src = displayCover;
+    inlinePlayer.els.cover.style.display = 'block';
+    inlinePlayer.els.coverPlaceholder.style.display = 'none';
+    inlinePlayer.els.cover.onerror = () => {
+      if (metadataToken !== inlinePlayer.metadataToken) return;
+      if (displayCover !== coverUrl && inlinePlayer.els.cover.src !== coverUrl) {
+        inlinePlayer.els.cover.src = coverUrl;
+        return;
+      }
+      inlinePlayer.els.cover.style.display = 'none';
+      inlinePlayer.els.coverPlaceholder.style.display = 'flex';
+    };
+
+    let bgUsingFallback = false;
+    inlinePlayer.els.bgCover.src = displayCover;
+    inlinePlayer.els.bgCover.onload = () => {
+      if (metadataToken === inlinePlayer.metadataToken) inlinePlayer.els.bgCover.classList.add('loaded');
+    };
+    inlinePlayer.els.bgCover.onerror = () => {
+      if (metadataToken !== inlinePlayer.metadataToken) return;
+      if (!bgUsingFallback && displayCover !== coverUrl) {
+        bgUsingFallback = true;
+        inlinePlayer.els.bgCover.src = coverUrl;
+        return;
+      }
+      if (metadataToken === inlinePlayer.metadataToken) inlinePlayer.els.bgCover.classList.remove('loaded');
+    };
+    applyInlineThemeFromCover(coverUrl, metadataToken);
+  };
+
+  const coverUrl = getSongCoverUrl(song);
+  inlinePlayer.els.cover.classList.remove('loaded');
+  inlinePlayer.els.bgCover.classList.remove('loaded');
+
+  if (coverUrl) {
+    applyCover(coverUrl);
+  } else {
+    inlinePlayer.els.cover.removeAttribute('src');
+    inlinePlayer.els.bgCover.removeAttribute('src');
+    inlinePlayer.els.cover.style.display = 'none';
+    inlinePlayer.els.coverPlaceholder.style.display = 'flex';
+  }
+
+  getBestCoverUrl(song).then((bestCoverUrl) => {
+    if (metadataToken !== inlinePlayer.metadataToken) return;
+    const resolvedCoverUrl = bestCoverUrl || getSongCoverUrl(song);
+    if (resolvedCoverUrl && resolvedCoverUrl !== coverUrl) {
+      song.cover = resolvedCoverUrl;
+      song.img = resolvedCoverUrl;
+      applyCover(resolvedCoverUrl);
+    } else if (!coverUrl) {
+      clearInlinePlayerTheme();
+    }
+  }).catch((err) => {
+    console.warn('[Inline Player] cover lookup failed:', err.message);
+    if (metadataToken === inlinePlayer.metadataToken && !coverUrl) clearInlinePlayerTheme();
+  });
+}
+
+function updateInlinePlayerProgress() {
+  if (!inlinePlayer.active || inlinePlayer.isSeeking) return;
+  const duration = getFiniteSeconds(audio.duration);
+  const currentTime = getFiniteSeconds(audio.currentTime);
+  const percent = duration ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
+  if (inlinePlayer.els.slider) {
+    inlinePlayer.els.slider.value = percent;
+    inlinePlayer.els.slider.style.setProperty('--share-progress', `${percent}%`);
+  }
+  if (inlinePlayer.els.currentTime) inlinePlayer.els.currentTime.textContent = formatTime(currentTime);
+  if (inlinePlayer.els.duration) inlinePlayer.els.duration.textContent = formatTime(duration);
+}
+
+function getInlineLyricWindow(time, duration) {
+  if (!activeLyrics.length) return null;
+  let index = activeLyrics.findIndex(line => line.time > time);
+  index = index === -1 ? activeLyrics.length - 1 : Math.max(0, index - 1);
+  const start = activeLyrics[index]?.time ?? 0;
+  const end = activeLyrics[index + 1]?.time ?? duration;
+  const lineDuration = Math.max(0.8, (Number.isFinite(end) ? end : start + 4) - start);
+  return {
+    index,
+    progress: Math.max(0, Math.min(1, (time - start) / lineDuration)),
+  };
+}
+
+const INLINE_LYRIC_SLIDE_DURATION_MS = 460;
+
+function clearInlineLyricSlide(list) {
+  if (list?._lyricSlideTimer) {
+    window.clearTimeout(list._lyricSlideTimer);
+    list._lyricSlideTimer = 0;
+  }
+  list?.classList.remove('is-sliding');
+}
+
+function ensureInlineLyricParts(row) {
+  let text = row.querySelector('.share-lyric-text');
+  if (!text) {
+    text = document.createElement('span');
+    text.className = 'share-lyric-text';
+    row.appendChild(text);
+  }
+
+  let fill = row.querySelector('.share-lyric-fill');
+  if (!fill) {
+    fill = document.createElement('span');
+    fill.className = 'share-lyric-fill';
+    fill.setAttribute('aria-hidden', 'true');
+    row.appendChild(fill);
+  }
+
+  return { text, fill };
+}
+
+function createInlineLyricRow() {
+  const row = document.createElement('div');
+  row.className = 'share-lyric-row';
+  row.innerHTML = '<span class="share-lyric-text"></span><span class="share-lyric-fill" aria-hidden="true"></span>';
+  ensureInlineLyricParts(row);
+  return row;
+}
+
+function ensureInlineLyricRows(list, count) {
+  const rows = Array.from(list.querySelectorAll('.share-lyric-row'));
+  while (rows.length < count) {
+    const row = createInlineLyricRow();
+    list.appendChild(row);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function getInlineLyricSlotMetrics() {
+  const list = inlinePlayer.els.lyricList;
+  if (!list) return null;
+  const styles = window.getComputedStyle(list);
+  const gap = parseFloat(styles.rowGap || '0') || 0;
+  const rowHeight = Math.max(1, (list.clientHeight - gap * 2) / 3);
+  const step = rowHeight + gap;
+  list.style.setProperty('--lyric-row-height', `${rowHeight}px`);
+  return { step };
+}
+
+function setInlineLyricSlot(row, slot, metrics) {
+  row.dataset.slot = String(slot);
+  row.style.setProperty('--lyric-y', `${slot * metrics.step}px`);
+}
+
+function setInlineLyricRole(row, role) {
+  row.classList.remove('previous', 'active', 'next');
+  row.classList.add(role);
+  row.dataset.role = role;
+}
+
+function setInlineLyricContent(row, line, lineIndex, progress = 0) {
+  const { text, fill } = ensureInlineLyricParts(row);
+  const lineText = line?.text || '';
+  text.textContent = lineText;
+  fill.textContent = lineText;
+  row.dataset.lineIndex = String(lineIndex);
+  row.style.setProperty('--karaoke-progress', `${Math.min(1, Math.max(0, progress)) * 100}%`);
+}
+
+function setInlineKaraokeProgress(progress) {
+  const activeRow = inlinePlayer.els.lyricList?.querySelector('.share-lyric-row.active');
+  if (!activeRow) return;
+  const safeProgress = Number.isFinite(progress) ? Math.min(1, Math.max(0, progress)) : 0;
+  activeRow.style.setProperty('--karaoke-progress', `${safeProgress * 100}%`);
+}
+
+function renderInlineLyricWindowNow(list, lyrics, index, progress) {
+  const rows = ensureInlineLyricRows(list, 3);
+  rows.slice(3).forEach(row => row.remove());
+
+  const metrics = getInlineLyricSlotMetrics();
+  if (!metrics) return;
+
+  const roles = ['previous', 'active', 'next'];
+  const lineIndices = index < 0 ? [-2, -1, 0] : [index - 1, index, index + 1];
+  const lines = index < 0
+    ? [null, { text: '暂无歌词' }, null]
+    : lineIndices.map(lineIndex => lyrics[lineIndex] || null);
+
+  rows.slice(0, 3).forEach((row, rowIndex) => {
+    row.classList.remove('is-moving', 'is-exiting', 'no-motion');
+    setInlineLyricRole(row, roles[rowIndex]);
+    setInlineLyricContent(row, lines[rowIndex], lineIndices[rowIndex], rowIndex === 1 ? progress : 0);
+    setInlineLyricSlot(row, rowIndex, metrics);
+  });
+
+  list.dataset.lyricIndex = String(index);
+  setInlineKaraokeProgress(progress);
+}
+
+function slideInlineLyricWindow(list, lyrics, previousIndex, index, progress) {
+  const direction = index > previousIndex ? 1 : -1;
+  const metrics = getInlineLyricSlotMetrics();
+  const previousRow = list.querySelector('.share-lyric-row.previous');
+  const activeRow = list.querySelector('.share-lyric-row.active');
+  const nextRow = list.querySelector('.share-lyric-row.next');
+
+  if (!metrics || !previousRow || !activeRow || !nextRow) {
+    renderInlineLyricWindowNow(list, lyrics, index, progress);
+    return;
+  }
+
+  clearInlineLyricSlide(list);
+  list.classList.add('is-sliding');
+
+  [previousRow, activeRow, nextRow].forEach((row, slot) => {
+    row.classList.remove('is-moving', 'is-exiting', 'no-motion');
+    setInlineLyricSlot(row, slot, metrics);
+  });
+
+  const enteringRow = createInlineLyricRow();
+  enteringRow.classList.add('no-motion');
+  list.appendChild(enteringRow);
+
+  if (direction > 0) {
+    setInlineLyricRole(enteringRow, 'next');
+    setInlineLyricContent(enteringRow, lyrics[index + 1] || null, index + 1, 0);
+    setInlineLyricSlot(enteringRow, 3, metrics);
+  } else {
+    setInlineLyricRole(enteringRow, 'previous');
+    setInlineLyricContent(enteringRow, lyrics[index - 1] || null, index - 1, 0);
+    setInlineLyricSlot(enteringRow, -1, metrics);
+  }
+
+  void list.offsetHeight;
+  [previousRow, activeRow, nextRow, enteringRow].forEach(row => {
+    row.classList.remove('no-motion');
+    row.classList.add('is-moving');
+  });
+
+  if (direction > 0) {
+    previousRow.classList.add('is-exiting');
+    setInlineLyricRole(previousRow, 'previous');
+    setInlineLyricSlot(previousRow, -1, metrics);
+
+    setInlineLyricRole(activeRow, 'previous');
+    setInlineLyricContent(activeRow, lyrics[index - 1] || null, index - 1, 0);
+    setInlineLyricSlot(activeRow, 0, metrics);
+
+    setInlineLyricRole(nextRow, 'active');
+    setInlineLyricContent(nextRow, lyrics[index] || null, index, progress);
+    setInlineLyricSlot(nextRow, 1, metrics);
+
+    setInlineLyricRole(enteringRow, 'next');
+    setInlineLyricSlot(enteringRow, 2, metrics);
+  } else {
+    nextRow.classList.add('is-exiting');
+    setInlineLyricRole(nextRow, 'next');
+    setInlineLyricSlot(nextRow, 3, metrics);
+
+    setInlineLyricRole(activeRow, 'next');
+    setInlineLyricContent(activeRow, lyrics[index + 1] || null, index + 1, 0);
+    setInlineLyricSlot(activeRow, 2, metrics);
+
+    setInlineLyricRole(previousRow, 'active');
+    setInlineLyricContent(previousRow, lyrics[index] || null, index, progress);
+    setInlineLyricSlot(previousRow, 1, metrics);
+
+    setInlineLyricRole(enteringRow, 'previous');
+    setInlineLyricSlot(enteringRow, 0, metrics);
+  }
+
+  list.dataset.lyricIndex = String(index);
+  setInlineKaraokeProgress(progress);
+
+  list._lyricSlideTimer = window.setTimeout(() => {
+    const rows = direction > 0
+      ? [activeRow, nextRow, enteringRow]
+      : [enteringRow, previousRow, activeRow];
+    const exitRow = direction > 0 ? previousRow : nextRow;
+    const nextMetrics = getInlineLyricSlotMetrics();
+
+    exitRow.remove();
+    rows.forEach((row, slot) => {
+      row.classList.remove('is-moving', 'is-exiting', 'no-motion');
+      setInlineLyricRole(row, ['previous', 'active', 'next'][slot]);
+      if (nextMetrics) setInlineLyricSlot(row, slot, nextMetrics);
+    });
+
+    list.classList.remove('is-sliding');
+    list._lyricSlideTimer = 0;
+  }, INLINE_LYRIC_SLIDE_DURATION_MS);
+}
+
+function updateInlineLyricWindow(lyrics, index, initialProgress = 0) {
+  const list = inlinePlayer.els.lyricList;
+  if (!list) return;
+
+  const progress = Number.isFinite(initialProgress) ? Math.min(1, Math.max(0, initialProgress)) : 0;
+  if (!lyrics.length || index < 0) {
+    clearInlineLyricSlide(list);
+    renderInlineLyricWindowNow(list, [], -1, 0);
+    return;
+  }
+
+  const previousIndex = Number(list.dataset.lyricIndex);
+  const isAdjacentMove = Number.isFinite(previousIndex) && Math.abs(index - previousIndex) === 1;
+  const canSlide = isAdjacentMove
+    && !list.classList.contains('is-sliding')
+    && list.querySelectorAll('.share-lyric-row').length === 3;
+
+  if (canSlide) {
+    slideInlineLyricWindow(list, lyrics, previousIndex, index, progress);
+  } else {
+    clearInlineLyricSlide(list);
+    renderInlineLyricWindowNow(list, lyrics, index, progress);
+  }
+}
+
+function syncInlinePlayerLyrics(time = audio.currentTime, duration = audio.duration) {
+  if (!inlinePlayer.active || !inlinePlayer.els.lyricList) return;
+  if (!activeLyrics.length) {
+    updateInlineLyricWindow([], -1, 0);
+    return;
+  }
+
+  const lyric = getInlineLyricWindow(time, duration);
+  if (!lyric) return;
+  if (lyric.index !== inlinePlayer.lyricIndex) {
+    inlinePlayer.lyricIndex = lyric.index;
+    updateInlineLyricWindow(activeLyrics, lyric.index, lyric.progress);
+  } else {
+    setInlineKaraokeProgress(lyric.progress);
+  }
+}
+
+function stopInlinePlayerFrame() {
+  if (!inlinePlayer.frameId) return;
+  cancelAnimationFrame(inlinePlayer.frameId);
+  inlinePlayer.frameId = 0;
+}
+
+function startInlinePlayerFrame() {
+  if (!inlinePlayer.active) return;
+  stopInlinePlayerFrame();
+  const tick = () => {
+    updateInlinePlayerProgress();
+    syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+    if (inlinePlayer.active && !audio.paused && !audio.ended) {
+      inlinePlayer.frameId = requestAnimationFrame(tick);
+    }
+  };
+  inlinePlayer.frameId = requestAnimationFrame(tick);
+}
+
+function openInlinePlayerOverlay(song) {
+  if (!isSongReadyForPlayerPage(song)) {
+    throw new Error('请先播放成功后再进入播放页');
+  }
+
+  ensureInlinePlayerOverlay();
+  inlinePlayer.active = true;
+  inlinePlayer.lyricIndex = -1;
+  inlinePlayer.root.classList.add('active');
+  inlinePlayer.root.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('inline-player-open');
+  updateInlinePlayerMetadata();
+  updateInlinePlayerProgress();
+  setInlinePlayerPlayState(!audio.paused && !audio.ended);
+  syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+  if (!audio.paused && !audio.ended) startInlinePlayerFrame();
+}
+
+function restorePlaybackStateSnapshot() {
+  const snapshot = readPlaybackStateSnapshot();
+  if (!snapshot?.audioUrl || !snapshot?.song) return false;
+
+  const songKey = snapshot.songKey || getSongKey(snapshot.song);
+  const itemEl = getSongItemByKey(songKey);
+  if (!itemEl) return false;
+
+  activeSongId = songKey;
+  activePlayBtn = itemEl.querySelector('.play-btn');
+  activeProgressSlider = itemEl.querySelector('.player-progress-slider');
+  activeCurrentTimeText = itemEl.querySelector('.player-current-time');
+  activeTotalTimeText = itemEl.querySelector('.player-total-time');
+  activeLyricContainer = itemEl.querySelector('.player-lyric-container');
+  activeLyricLineEl = itemEl.querySelector('.player-lyric-line');
+  activeLyrics = Array.isArray(snapshot.lyrics) ? snapshot.lyrics : [];
+  lastLyricIndex = -1;
+  activePlaybackContext = {
+    song: snapshot.song,
+    audioUrl: snapshot.audioUrl,
+    downloadUrl: snapshot.downloadUrl || '',
+    filename: snapshot.filename || '',
+  };
+
+  itemEl.classList.add('expanded');
+  setPlayerPageEntryReady(itemEl, true);
+  if (activeCurrentTimeText) activeCurrentTimeText.innerText = formatTime(snapshot.currentTime || 0);
+  if (activeTotalTimeText) activeTotalTimeText.innerText = formatTime(snapshot.duration || 0);
+  if (activeProgressSlider && snapshot.duration) {
+    activeProgressSlider.value = Math.max(0, Math.min(100, (Number(snapshot.currentTime || 0) / Number(snapshot.duration)) * 100));
+  }
+
+  const restoreTime = getFiniteSeconds(snapshot.currentTime);
+  const shouldResume = !snapshot.paused && !snapshot.ended;
+
+  audio.addEventListener('loadedmetadata', () => {
+    if (restoreTime) {
+      try {
+        const duration = getFiniteSeconds(audio.duration);
+        audio.currentTime = duration ? Math.min(restoreTime, Math.max(0, duration - 0.2)) : restoreTime;
+      } catch (err) {
+        console.warn('[Playback] failed to restore time', err);
+      }
+    }
+    if (activeTotalTimeText) activeTotalTimeText.innerText = formatTime(audio.duration);
+    triggerLyricScrollSync();
+    if (shouldResume) {
+      audio.play().catch((err) => {
+        console.warn('[Playback] resume after return failed:', err);
+      });
+    }
+  }, { once: true });
+  audio.src = snapshot.audioUrl;
+
+  if (!activeLyrics.length) {
+    fetchLyrics(snapshot.song).then((parsedLyrics) => {
+      if (activeSongId !== songKey) return;
+      activeLyrics = parsedLyrics || [];
+      lastLyricIndex = -1;
+      triggerLyricScrollSync();
+      if (!activeLyrics.length && activeLyricLineEl) activeLyricLineEl.innerText = '暂无歌词';
+    }).catch(() => {
+      if (activeSongId === songKey && activeLyricLineEl) activeLyricLineEl.innerText = '暂无歌词';
+    });
+  } else {
+    triggerLyricScrollSync();
+  }
+
+  return true;
+}
 
 audio.addEventListener('timeupdate', () => {
   if (activeSongId && activeProgressSlider && activeCurrentTimeText && !isUserSeeking) {
@@ -2350,6 +3395,8 @@ audio.addEventListener('timeupdate', () => {
     activeProgressSlider.value = pct;
     activeCurrentTimeText.innerText = formatTime(audio.currentTime);
   }
+
+  updateInlinePlayerProgress();
 
   // Sync single line lyric
   if (activeSongId && activeLyrics.length > 0 && activeLyricLineEl) {
@@ -2366,12 +3413,15 @@ audio.addEventListener('timeupdate', () => {
       activeLyricLineEl.innerText = activeLyrics[index].text || ' ';
     }
   }
+  syncInlinePlayerLyrics(audio.currentTime, audio.duration);
 });
 
 audio.addEventListener('loadedmetadata', () => {
   if (activeSongId && activeTotalTimeText) {
     activeTotalTimeText.innerText = formatTime(audio.duration);
   }
+  updateInlinePlayerProgress();
+  syncInlinePlayerLyrics(audio.currentTime, audio.duration);
 });
 
 audio.addEventListener('playing', () => {
@@ -2382,7 +3432,10 @@ audio.addEventListener('playing', () => {
     if (wrapper) {
       wrapper.classList.remove('loading');
     }
+    setPlayerPageEntryReady(activePlayBtn.closest('.song-item'), true);
   }
+  setInlinePlayerPlayState(true);
+  startInlinePlayerFrame();
 });
 
 audio.addEventListener('pause', () => {
@@ -2394,6 +3447,8 @@ audio.addEventListener('pause', () => {
       wrapper.classList.remove('loading');
     }
   }
+  setInlinePlayerPlayState(false);
+  stopInlinePlayerFrame();
 });
 
 audio.addEventListener('ended', () => {
@@ -2407,12 +3462,17 @@ audio.addEventListener('ended', () => {
   }
   if (activeProgressSlider) activeProgressSlider.value = 0;
   if (activeCurrentTimeText) activeCurrentTimeText.innerText = '00:00';
+  clearPlayerPageEntryReady();
+  setInlinePlayerPlayState(false);
+  updateInlinePlayerProgress();
+  stopInlinePlayerFrame();
 });
 
 audio.addEventListener('error', () => {
   if (activeSongId) {
     console.error('[Audio Error]', audio.error);
     showToast('播放出错，无法加载音频流', 'error');
+    closeInlinePlayerOverlay();
     resetActiveSongUI();
   }
 });
@@ -2426,6 +3486,7 @@ function formatTime(seconds) {
 
 function triggerLyricScrollSync() {
   lastLyricIndex = -1;
+  inlinePlayer.lyricIndex = -1;
   const e = new Event('timeupdate');
   audio.dispatchEvent(e);
 }
@@ -2588,12 +3649,17 @@ async function togglePlay(song, itemEl) {
 
   try {
     const displayFilename = buildSongFilename(song, 'mp3');
-    const { downloadUrl } = await createDownloadLinkWithFallback(song, '128k', displayFilename, dummyStatusText);
+    const { downloadUrl, resolution, finalFilename } = await createDownloadLinkWithFallback(song, '128k', displayFilename, dummyStatusText, {
+      validate: false,
+      includeCover: false,
+    });
+    const playbackSong = resolution?.resolvedSong || song;
     
     if (loadingSongId !== songKey) return;
     
     // Loaded URL successfully! Stop current song and switch now
     loadingSongId = null;
+    clearPlayerPageEntryReady();
 
     if (activeSongId) {
       audio.pause();
@@ -2620,15 +3686,37 @@ async function togglePlay(song, itemEl) {
     
     activeLyrics = [];
     lastLyricIndex = -1;
+    const contextSong = {
+      ...song,
+      ...playbackSong,
+      name: playbackSong.name || song.name || '',
+      singer: playbackSong.singer || song.singer || '',
+      albumName: playbackSong.albumName || song.albumName || '',
+      interval: playbackSong.interval || song.interval || '',
+      img: playbackSong.img || song.img || '',
+      cover: playbackSong.cover || playbackSong.img || song.cover || song.img || '',
+      source: playbackSong.source || song.source || '',
+      songmid: playbackSong.songmid || song.songmid || '',
+      types: playbackSong.types?.length ? playbackSong.types : (song.types || []),
+      _types: Object.keys(playbackSong._types || {}).length ? playbackSong._types : (song._types || {}),
+      typeUrl: playbackSong.typeUrl || song.typeUrl || {},
+    };
+    activePlaybackContext = {
+      song: contextSong,
+      audioUrl: getPlaybackDownloadUrl(downloadUrl),
+      downloadUrl,
+      filename: finalFilename || displayFilename,
+    };
 
     currentTimeText.innerText = '00:00';
     slider.value = 0;
     if (activeLyricLineEl) activeLyricLineEl.innerText = '歌词加载中...';
 
-    audio.src = getPlaybackDownloadUrl(downloadUrl);
-    fetchLyrics(song).then((parsedLyrics) => {
+    audio.src = activePlaybackContext.audioUrl;
+    fetchLyrics(playbackSong).then((parsedLyrics) => {
       if (activeSongId !== songKey) return;
       activeLyrics = parsedLyrics || [];
+      if (activePlaybackContext) activePlaybackContext.lyrics = activeLyrics;
       lastLyricIndex = -1;
       if (activeLyrics.length === 0) {
         if (activeLyricLineEl) activeLyricLineEl.innerText = '暂无歌词';
@@ -2677,8 +3765,16 @@ function resetActiveSongUI() {
   activeLyricContainer = null;
   activeLyricLineEl = null;
   activeLyrics = [];
+  activePlaybackContext = null;
   lastLyricIndex = -1;
+  clearPlayerPageEntryReady();
 }
 
 // Run App
 window.addEventListener('DOMContentLoaded', init);
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) {
+    sessionStorage.removeItem(SEARCH_STATE_STORAGE_KEY);
+    restorePlaybackStateSnapshot();
+  }
+});
