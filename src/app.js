@@ -2819,6 +2819,7 @@ const inlinePlayer = {
   isSeeking: false,
   frameId: 0,
   lyricIndex: -1,
+  lyricDrag: null,
   metadataToken: 0,
   els: {},
 };
@@ -2955,6 +2956,10 @@ function ensureInlinePlayerOverlay() {
   inlinePlayer.els.slider?.addEventListener('change', commitInlineSeek);
   inlinePlayer.els.slider?.addEventListener('pointerup', commitInlineSeek);
   inlinePlayer.els.slider?.addEventListener('touchend', commitInlineSeek);
+  inlinePlayer.els.lyricList?.addEventListener('pointerdown', startInlineLyricDrag);
+  inlinePlayer.els.lyricList?.addEventListener('pointermove', moveInlineLyricDrag);
+  inlinePlayer.els.lyricList?.addEventListener('pointerup', commitInlineLyricDrag);
+  inlinePlayer.els.lyricList?.addEventListener('pointercancel', cancelInlineLyricDrag);
   window.addEventListener('resize', () => {
     if (inlinePlayer.active) syncInlinePlayerLyrics(audio.currentTime, audio.duration);
   });
@@ -2967,6 +2972,7 @@ function ensureInlinePlayerOverlay() {
 
 function closeInlinePlayerOverlay() {
   if (!inlinePlayer.root) return;
+  finishInlineLyricDrag({ commit: false });
   inlinePlayer.active = false;
   inlinePlayer.isSeeking = false;
   inlinePlayer.root.classList.remove('active');
@@ -3067,10 +3073,15 @@ function updateInlinePlayerProgress() {
   if (inlinePlayer.els.duration) inlinePlayer.els.duration.textContent = formatTime(duration);
 }
 
+function getInlineLyricIndexAtTime(time) {
+  if (!activeLyrics.length) return -1;
+  let index = activeLyrics.findIndex(line => line.time > time);
+  return index === -1 ? activeLyrics.length - 1 : Math.max(0, index - 1);
+}
+
 function getInlineLyricWindow(time, duration) {
   if (!activeLyrics.length) return null;
-  let index = activeLyrics.findIndex(line => line.time > time);
-  index = index === -1 ? activeLyrics.length - 1 : Math.max(0, index - 1);
+  const index = getInlineLyricIndexAtTime(time);
   const start = activeLyrics[index]?.time ?? 0;
   const end = activeLyrics[index + 1]?.time ?? duration;
   const lineDuration = Math.max(0.8, (Number.isFinite(end) ? end : start + 4) - start);
@@ -3138,6 +3149,17 @@ function getInlineLyricSlotMetrics() {
   return { step };
 }
 
+function getInlineLyricDragPixelsPerLine(metrics) {
+  const list = inlinePlayer.els.lyricList;
+  const viewportHeight = Math.max(1, list?.clientHeight || metrics.step * 3);
+  const lyricCount = activeLyrics.length || 1;
+  const duration = getFiniteSeconds(audio.duration) || intervalToSeconds(activePlaybackContext?.song?.interval);
+  const linesByCount = Math.round(lyricCount / 8);
+  const linesByDuration = duration ? Math.round(duration / 20) : 0;
+  const linesPerViewport = clamp(Math.max(5, linesByCount, linesByDuration), 5, 30);
+  return Math.max(4, viewportHeight / linesPerViewport);
+}
+
 function setInlineLyricSlot(row, slot, metrics) {
   row.dataset.slot = String(slot);
   row.style.setProperty('--lyric-y', `${slot * metrics.step}px`);
@@ -3163,6 +3185,99 @@ function setInlineKaraokeProgress(progress) {
   if (!activeRow) return;
   const safeProgress = Number.isFinite(progress) ? Math.min(1, Math.max(0, progress)) : 0;
   activeRow.style.setProperty('--karaoke-progress', `${safeProgress * 100}%`);
+}
+
+function getInlineLyricSeekTime(index) {
+  if (!activeLyrics.length) return 0;
+  const safeIndex = Math.max(0, Math.min(activeLyrics.length - 1, index));
+  const targetTime = Number(activeLyrics[safeIndex]?.time || 0);
+  const duration = getFiniteSeconds(audio.duration);
+  return duration ? Math.min(Math.max(0, targetTime), Math.max(0, duration - 0.05)) : Math.max(0, targetTime);
+}
+
+function previewInlineLyricSeek(index) {
+  if (!inlinePlayer.active || !activeLyrics.length) return;
+  const targetIndex = Math.max(0, Math.min(activeLyrics.length - 1, index));
+  inlinePlayer.lyricIndex = targetIndex;
+  clearInlineLyricSlide(inlinePlayer.els.lyricList);
+  renderInlineLyricWindowNow(inlinePlayer.els.lyricList, activeLyrics, targetIndex, 0);
+
+  const targetTime = getInlineLyricSeekTime(targetIndex);
+  const duration = getFiniteSeconds(audio.duration);
+  const percent = duration ? Math.max(0, Math.min(100, (targetTime / duration) * 100)) : 0;
+  if (inlinePlayer.els.slider) {
+    inlinePlayer.els.slider.value = percent;
+    inlinePlayer.els.slider.style.setProperty('--share-progress', `${percent}%`);
+  }
+  if (inlinePlayer.els.currentTime) inlinePlayer.els.currentTime.textContent = formatTime(targetTime);
+}
+
+function startInlineLyricDrag(event) {
+  if (!inlinePlayer.active || !activeLyrics.length || event.button > 0) return;
+  const metrics = getInlineLyricSlotMetrics();
+  if (!metrics?.step) return;
+
+  event.preventDefault();
+  inlinePlayer.els.lyricList.setPointerCapture?.(event.pointerId);
+  inlinePlayer.isSeeking = true;
+  stopInlinePlayerFrame();
+  clearInlineLyricSlide(inlinePlayer.els.lyricList);
+
+  const currentIndex = Math.max(0, getInlineLyricIndexAtTime(audio.currentTime));
+  inlinePlayer.lyricDrag = {
+    pointerId: event.pointerId,
+    startY: event.clientY,
+    startIndex: currentIndex,
+    targetIndex: currentIndex,
+    pixelsPerLine: getInlineLyricDragPixelsPerLine(metrics),
+  };
+  inlinePlayer.els.lyricList.classList.add('is-dragging');
+  previewInlineLyricSeek(currentIndex);
+}
+
+function moveInlineLyricDrag(event) {
+  const drag = inlinePlayer.lyricDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+
+  event.preventDefault();
+  const offsetRows = Math.round((drag.startY - event.clientY) / drag.pixelsPerLine);
+  const targetIndex = Math.max(0, Math.min(activeLyrics.length - 1, drag.startIndex + offsetRows));
+  if (targetIndex === drag.targetIndex) return;
+
+  drag.targetIndex = targetIndex;
+  previewInlineLyricSeek(targetIndex);
+}
+
+function finishInlineLyricDrag({ commit = false, pointerId } = {}) {
+  const drag = inlinePlayer.lyricDrag;
+  if (!drag) return;
+  if (pointerId != null && drag.pointerId !== pointerId) return;
+
+  try {
+    inlinePlayer.els.lyricList?.releasePointerCapture?.(drag.pointerId);
+  } catch (_) {
+    // Pointer capture may already be released by the browser.
+  }
+  inlinePlayer.els.lyricList?.classList.remove('is-dragging');
+  inlinePlayer.lyricDrag = null;
+  inlinePlayer.isSeeking = false;
+
+  if (commit) {
+    audio.currentTime = getInlineLyricSeekTime(drag.targetIndex);
+  }
+
+  updateInlinePlayerProgress();
+  syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+  if (!audio.paused && !audio.ended) startInlinePlayerFrame();
+}
+
+function commitInlineLyricDrag(event) {
+  event.preventDefault();
+  finishInlineLyricDrag({ commit: true, pointerId: event.pointerId });
+}
+
+function cancelInlineLyricDrag(event) {
+  finishInlineLyricDrag({ commit: false, pointerId: event.pointerId });
 }
 
 function renderInlineLyricWindowNow(list, lyrics, index, progress) {
@@ -3309,6 +3424,7 @@ function updateInlineLyricWindow(lyrics, index, initialProgress = 0) {
 }
 
 function syncInlinePlayerLyrics(time = audio.currentTime, duration = audio.duration) {
+  if (inlinePlayer.lyricDrag) return;
   if (!inlinePlayer.active || !inlinePlayer.els.lyricList) return;
   if (!activeLyrics.length) {
     updateInlineLyricWindow([], -1, 0);
@@ -3335,8 +3451,10 @@ function startInlinePlayerFrame() {
   if (!inlinePlayer.active) return;
   stopInlinePlayerFrame();
   const tick = () => {
-    updateInlinePlayerProgress();
-    syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+    if (!inlinePlayer.lyricDrag) {
+      updateInlinePlayerProgress();
+      syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+    }
     if (inlinePlayer.active && !audio.paused && !audio.ended) {
       inlinePlayer.frameId = requestAnimationFrame(tick);
     }
@@ -3356,7 +3474,7 @@ function openInlinePlayerOverlay(song) {
   inlinePlayer.root.setAttribute('aria-hidden', 'false');
   document.body.classList.add('inline-player-open');
   updateInlinePlayerMetadata();
-  updateInlinePlayerProgress();
+  if (!inlinePlayer.lyricDrag) updateInlinePlayerProgress();
   setInlinePlayerPlayState(!audio.paused && !audio.ended);
   syncInlinePlayerLyrics(audio.currentTime, audio.duration);
   if (!audio.paused && !audio.ended) startInlinePlayerFrame();
@@ -3457,15 +3575,17 @@ audio.addEventListener('timeupdate', () => {
       activeLyricLineEl.innerText = activeLyrics[index].text || ' ';
     }
   }
-  syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+  if (!inlinePlayer.lyricDrag) syncInlinePlayerLyrics(audio.currentTime, audio.duration);
 });
 
 audio.addEventListener('loadedmetadata', () => {
   if (activeSongId && activeTotalTimeText) {
     activeTotalTimeText.innerText = formatTime(audio.duration);
   }
-  updateInlinePlayerProgress();
-  syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+  if (!inlinePlayer.lyricDrag) {
+    updateInlinePlayerProgress();
+    syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+  }
 });
 
 audio.addEventListener('playing', () => {
@@ -3529,6 +3649,7 @@ function formatTime(seconds) {
 }
 
 function triggerLyricScrollSync() {
+  if (inlinePlayer.lyricDrag) return;
   lastLyricIndex = -1;
   inlinePlayer.lyricIndex = -1;
   const e = new Event('timeupdate');

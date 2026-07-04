@@ -470,6 +470,10 @@ body {
   border: none;
   border-radius: 0;
   background: transparent;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .share-lyric-row {
@@ -491,6 +495,10 @@ body {
   opacity: 0.82;
   transform: translateY(var(--lyric-y));
   transition: color 0.36s ease, font-size 0.36s ease, font-weight 0.36s ease, opacity 0.36s ease, transform 0.36s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.share-lyric-list.is-dragging .share-lyric-row {
+  transition: color 0.16s ease, font-size 0.16s ease, font-weight 0.16s ease, opacity 0.16s ease, transform 0.16s ease;
 }
 
 .share-lyric-row.is-moving {
