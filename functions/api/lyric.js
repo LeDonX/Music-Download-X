@@ -10,7 +10,9 @@ const DEFAULT_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 };
 
-const UPSTREAM_TIMEOUT_MS = 9000;
+const UPSTREAM_TIMEOUT_MS = 4500;
+const FALLBACK_SEARCH_TIMEOUT_MS = 5500;
+const FALLBACK_SOURCE_ORDER = ['wy', 'kw', 'kg', 'mg', 'tx'];
 
 function jsonResponse(payload, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -35,7 +37,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = UPSTREAM_TIMEOUT_
   }
 }
 
-async function retry(fn, maxRetries = 2) {
+async function retry(fn, maxRetries = 1) {
   let lastError;
   for (let i = 0; i < maxRetries; i += 1) {
     try {
@@ -186,7 +188,7 @@ async function getNeteaseLyric(song) {
     if (!res.ok) throw new Error(`NetEase lyric HTTP ${res.status}`);
     const json = await res.json();
     return json?.lrc?.lyric ? json : null;
-  }, 3);
+  });
 
   return createLyricResult({
     lyric: body.lrc?.lyric || '',
@@ -210,7 +212,7 @@ async function getQQLyric(song) {
     const jsonText = text.trim().replace(/^[^(]*\(([\s\S]*)\)\s*;?$/, '$1');
     const json = JSON.parse(jsonText);
     return json?.lyric ? json : null;
-  }, 3);
+  });
 
   return createLyricResult({
     lyric: decodeBase64Text(body.lyric),
@@ -226,7 +228,7 @@ async function getKuwoLyric(song) {
     if (!res.ok) throw new Error(`Kuwo lyric HTTP ${res.status}`);
     const json = await res.json();
     return json?.data?.lrclist?.length ? json : null;
-  }, 3);
+  });
 
   const data = body.data;
   const tags = [
@@ -434,7 +436,7 @@ async function getKugouLyric(song) {
     if (!res.ok) throw new Error(`Kugou lyric search HTTP ${res.status}`);
     const json = await res.json();
     return json?.candidates?.length ? json : null;
-  }, 3);
+  });
 
   const candidate = searchBody.candidates.find(item => song.hash && item.hash === song.hash) || searchBody.candidates[0];
   const downloadUrl = `http://lyrics.kugou.com/download?ver=1&client=pc&id=${encodeURIComponent(candidate.id)}&accesskey=${encodeURIComponent(candidate.accesskey)}&fmt=lrc&charset=utf8`;
@@ -450,7 +452,7 @@ async function getKugouLyric(song) {
     if (!res.ok) throw new Error(`Kugou lyric download HTTP ${res.status}`);
     const json = await res.json();
     return json?.content ? json : null;
-  }, 3);
+  });
 
   return createLyricResult({
     lyric: decodeBase64Text(downloadBody.content),
@@ -478,32 +480,60 @@ async function searchSource(origin, target, source) {
   const keyword = `${target.singer || ''} ${target.name || ''}`.trim() || target.name;
   if (!keyword) return [];
   const url = `${origin}/api/search?keyword=${encodeURIComponent(keyword)}&source=${encodeURIComponent(source)}&page=1&limit=5`;
-  const res = await fetchWithTimeout(url, { headers: DEFAULT_HEADERS }, 12000);
+  const res = await fetchWithTimeout(url, { headers: DEFAULT_HEADERS }, FALLBACK_SEARCH_TIMEOUT_MS);
   if (!res.ok) return [];
   const data = await res.json();
   return Array.isArray(data?.list) ? data.list : [];
 }
 
+function getFallbackSourceOrder(source) {
+  return [
+    source,
+    ...FALLBACK_SOURCE_ORDER.filter(item => item !== source),
+  ].filter(Boolean);
+}
+
+async function firstFulfilled(tasks) {
+  const errors = [];
+  const wrapped = tasks.map(task => Promise.resolve()
+    .then(task)
+    .then(value => {
+      if (!value) throw new Error('empty result');
+      return value;
+    }, err => {
+      errors.push(err);
+      throw err;
+    }));
+
+  try {
+    return await Promise.any(wrapped);
+  } catch {
+    throw new Error(errors.map(err => err?.message || String(err)).join('; ') || 'all tasks failed');
+  }
+}
+
 async function getFallbackLyric(context, target, errors) {
   const origin = new URL(context.request.url).origin;
-  const sources = ['wy', 'kw', 'kg', 'mg', 'tx'];
+  const sources = getFallbackSourceOrder(target.source);
 
-  for (const source of sources) {
+  return firstFulfilled(sources.map(source => async () => {
     let candidates = [];
     try {
       candidates = await searchSource(origin, target, source);
     } catch (err) {
       errors.push(`${source}: search failed: ${err.message}`);
-      continue;
+      throw err;
     }
 
     const ranked = candidates
       .map(candidate => ({ candidate, score: rankCandidate(target, candidate) }))
       .filter(item => item.score >= 70)
       .sort((a, b) => b.score - a.score)
-      .slice(0, 3);
+      .slice(0, 2);
 
-    for (const { candidate, score } of ranked) {
+    if (!ranked.length) throw new Error(`${source}: no matched lyric candidate`);
+
+    return firstFulfilled(ranked.map(({ candidate, score }) => async () => {
       try {
         const result = await getDirectLyric(candidate);
         return {
@@ -512,11 +542,10 @@ async function getFallbackLyric(context, target, errors) {
         };
       } catch (err) {
         errors.push(`${source}: ${candidate.name || candidate.songmid}: ${err.message}`);
+        throw err;
       }
-    }
-  }
-
-  throw new Error('all fallback lyric sources failed');
+    }));
+  }));
 }
 
 export async function onRequestGet(context) {
@@ -529,17 +558,20 @@ export async function onRequestGet(context) {
   }
 
   try {
-    const direct = await getDirectLyric(song);
-    return jsonResponse(direct);
+    const lyric = await firstFulfilled([
+      async () => {
+        try {
+          return await getDirectLyric(song);
+        } catch (err) {
+          errors.push(`direct: ${err.message}`);
+          throw err;
+        }
+      },
+      async () => getFallbackLyric(context, song, errors),
+    ]);
+    return jsonResponse({ ...lyric, attempts: errors });
   } catch (err) {
-    errors.push(`direct: ${err.message}`);
-  }
-
-  try {
-    const fallback = await getFallbackLyric(context, song, errors);
-    return jsonResponse({ ...fallback, attempts: errors });
-  } catch (err) {
-    errors.push(`fallback: ${err.message}`);
+    errors.push(`all: ${err.message}`);
     return jsonResponse({ error: 'lyric not found', attempts: errors }, 404);
   }
 }

@@ -24,6 +24,10 @@ const SEARCH_RETRY_DELAYS = [250, 700, 1400];
 const RESOLVE_TIMEOUT_MS = 22000;
 const RESOLUTION_HEADER_TIMEOUT_MS = 7000;
 const RESOLUTION_METADATA_TIMEOUT_MS = 12000;
+const LYRIC_NATIVE_TIMEOUT_MS = 4200;
+const LYRIC_API_TIMEOUT_MS = 8500;
+const LYRIC_TOTAL_TIMEOUT_MS = 9500;
+const LYRIC_CACHE_LIMIT = 80;
 const SUSPICIOUS_SHORT_AUDIO_SECONDS = 15;
 const SUSPICIOUS_SHORT_MIN_EXPECTED_SECONDS = 30;
 const SUSPICIOUS_DURATION_RATIO = 0.35;
@@ -279,6 +283,46 @@ function getPlatformName(source) {
 
 function getSongKey(song) {
   return `${song?.source || ''}_${song?.songmid || song?.hash || song?.copyrightId || ''}`;
+}
+
+const lyricCache = new Map();
+const lyricInflight = new Map();
+
+function getLyricCacheKey(song) {
+  return [
+    song?.source || '',
+    song?.songmid || '',
+    song?.hash || '',
+    song?.copyrightId || '',
+    song?.name || '',
+    song?.singer || '',
+  ].join('|');
+}
+
+function cacheLyrics(key, lyrics) {
+  if (!key || !Array.isArray(lyrics) || !lyrics.length) return;
+  if (lyricCache.has(key)) lyricCache.delete(key);
+  lyricCache.set(key, lyrics);
+  while (lyricCache.size > LYRIC_CACHE_LIMIT) {
+    const oldestKey = lyricCache.keys().next().value;
+    lyricCache.delete(oldestKey);
+  }
+}
+
+async function fetchWithAbortTimeout(url, options = {}, timeoutMs = LYRIC_API_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error(`request timeout after ${timeoutMs}ms`));
+  }, timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function withTimeout(promise, timeoutMs, message) {
@@ -3499,46 +3543,76 @@ function getLyricTextFromPayload(payload) {
 
 // Fetch lyrics with native sandbox first, falling back to platform APIs.
 async function fetchLyrics(song) {
-  // 1. Try native source from sandbox first (extremely accurate & fast).
-  if (state.sandbox) {
-    const attempts = [
-      { label: 'new', musicInfo: toNewMusicInfo(song) },
-      { label: 'old', musicInfo: toOldMusicInfo(song) },
-    ];
+  const cacheKey = getLyricCacheKey(song);
+  const cached = lyricCache.get(cacheKey);
+  if (cached?.length) return cached;
+  if (lyricInflight.has(cacheKey)) return lyricInflight.get(cacheKey);
 
-    for (const attempt of attempts) {
-      try {
-        const resolved = await state.sandbox.requestUrl(song.source, 'lyric', {
-          musicInfo: attempt.musicInfo,
-        });
-        const lrcText = getLyricTextFromPayload(resolved);
-        const parsed = parseLrc(lrcText);
-        if (parsed && parsed.length > 0) {
-          console.log(`[Lyric] Successfully fetched native lyrics from sandbox (${attempt.label})`);
-          return parsed;
-        }
-      } catch (err) {
-        console.warn(`[Lyric] Native sandbox ${attempt.label} lyric fetch failed, trying next source...`, err);
-      }
-    }
-  }
+  const loadPromise = withTimeout(
+    Promise.any([
+      fetchLyricsFromSandbox(song),
+      fetchLyricsFromApi(song),
+    ]),
+    LYRIC_TOTAL_TIMEOUT_MS,
+    '歌词加载超时'
+  ).then((lyrics) => {
+    const parsed = Array.isArray(lyrics) ? lyrics : [];
+    if (parsed.length) cacheLyrics(cacheKey, parsed);
+    return parsed;
+  }).catch((err) => {
+    console.warn('[Lyric] lyric lookup failed', err);
+    return [];
+  }).finally(() => {
+    lyricInflight.delete(cacheKey);
+  });
 
-  // 2. Fallback: ask the worker to try platform official lyric APIs and cross-source matches.
-  try {
-    const res = await fetch(`/api/lyric?${buildLyricParams(song).toString()}`, { cache: 'no-store' });
-    if (res.ok) {
-      const data = await res.json();
-      const parsed = parseLrc(getLyricTextFromPayload(data));
-      if (parsed && parsed.length > 0) {
-        console.log(`[Lyric] Successfully fetched fallback lyrics from ${data.provider || 'api'}`);
+  lyricInflight.set(cacheKey, loadPromise);
+  return loadPromise;
+}
+
+async function fetchLyricsFromSandbox(song) {
+  if (!state.sandbox) throw new Error('解析源未加载');
+
+  const attempts = [
+    { label: 'new', musicInfo: toNewMusicInfo(song) },
+    { label: 'old', musicInfo: toOldMusicInfo(song) },
+  ];
+  const errors = [];
+
+  for (const attempt of attempts) {
+    try {
+      const resolved = await withTimeout(
+        state.sandbox.requestUrl(song.source, 'lyric', { musicInfo: attempt.musicInfo }),
+        LYRIC_NATIVE_TIMEOUT_MS,
+        `解析源歌词 ${attempt.label} 超时`
+      );
+      const parsed = parseLrc(getLyricTextFromPayload(resolved));
+      if (parsed.length) {
+        console.log(`[Lyric] Successfully fetched native lyrics from sandbox (${attempt.label})`);
         return parsed;
       }
+      errors.push(`${attempt.label}: empty lyric`);
+    } catch (err) {
+      errors.push(`${attempt.label}: ${err.message || err}`);
     }
-  } catch (err) {
-    console.warn('[Lyric] Platform fallback lyric fetch failed', err);
   }
 
-  return [];
+  throw new Error(errors.join('; ') || '解析源未返回歌词');
+}
+
+async function fetchLyricsFromApi(song) {
+  const res = await fetchWithAbortTimeout(`/api/lyric?${buildLyricParams(song).toString()}`, {
+    cache: 'no-store',
+  }, LYRIC_API_TIMEOUT_MS);
+  if (!res.ok) throw new Error(`歌词接口 HTTP ${res.status}`);
+
+  const data = await res.json();
+  const parsed = parseLrc(getLyricTextFromPayload(data));
+  if (parsed.length) {
+    console.log(`[Lyric] Successfully fetched fallback lyrics from ${data.provider || 'api'}`);
+    return parsed;
+  }
+  throw new Error('歌词接口未返回有效歌词');
 }
 
 function parseLrc(lrcText) {
