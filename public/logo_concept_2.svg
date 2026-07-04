@@ -1,0 +1,44 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="512" height="512" rx="120" fill="#FFFFFF"/>
+  <!-- Decorative Ring -->
+  <rect x="16" y="16" width="480" height="480" rx="104" stroke="#F3F4F6" stroke-width="4"/>
+
+  <!-- Icon Group -->
+  <g transform="translate(256, 256)">
+    <!-- Outer Vinyl Ring / Share Orbit -->
+    <circle cx="0" cy="0" r="140" stroke="url(#concept2_gradient)" stroke-width="24" fill="none"/>
+    
+    <!-- Sharing Nodes (Circles on the orbit) -->
+    <circle cx="99" cy="-99" r="30" fill="url(#concept2_gradient)"/>
+    <circle cx="99" cy="-99" r="14" fill="#FFFFFF"/>
+
+    <!-- Bottom Right Node -->
+    <circle cx="99" cy="99" r="30" fill="url(#concept2_gradient)"/>
+    <circle cx="99" cy="99" r="14" fill="#FFFFFF"/>
+
+    <!-- Left Node -->
+    <circle cx="-140" cy="0" r="30" fill="url(#concept2_gradient)"/>
+    <circle cx="-140" cy="0" r="14" fill="#FFFFFF"/>
+
+    <!-- Sharing Connection Lines -->
+    <path d="M -140 0 L 99 -99" stroke="url(#concept2_gradient)" stroke-width="20" stroke-linecap="round"/>
+    <path d="M -140 0 L 99 99" stroke="url(#concept2_gradient)" stroke-width="20" stroke-linecap="round"/>
+
+    <!-- Download Arrow -->
+    <path d="M 0 -110 V 80" stroke="url(#concept2_gradient)" stroke-width="24" stroke-linecap="round"/>
+    <!-- Arrowhead at the bottom -->
+    <path d="M -40 40 L 0 80 L 40 40" stroke="url(#concept2_gradient)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+    
+    <!-- Play Triangle -->
+    <polygon points="-20,-24 -20,24 20,0" fill="#FFFFFF"/>
+  </g>
+
+  <!-- Gradients -->
+  <defs>
+    <linearGradient id="concept2_gradient" x1="-140" y1="-140" x2="140" y2="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#374151"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+  </defs>
+</svg>

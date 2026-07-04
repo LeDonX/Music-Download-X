@@ -1,4 +1,5 @@
 import { initResolverSandbox } from './resolver-sandbox.js';
+import { createPlayerPageController } from './player-page.js';
 
 const SOURCE_URLS = [
   'https://fastly.jsdelivr.net/gh/pdone/lx-music-source@main/lx/latest.js',
@@ -341,184 +342,6 @@ function getImageProxyUrl(url) {
 function getSongCoverUrl(song) {
   const coverUrl = song?.cover || song?.img || '';
   return /^https?:\/\//i.test(coverUrl) ? coverUrl : '';
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function rgbToCss(rgb) {
-  return rgb.map(value => Math.round(clamp(value, 0, 255))).join(', ');
-}
-
-function rgbToHsl([r, g, b]) {
-  r /= 255;
-  g /= 255;
-  b /= 255;
-
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  let h = 0;
-  let s = 0;
-  const l = (max + min) / 2;
-
-  if (max !== min) {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    switch (max) {
-      case r:
-        h = (g - b) / d + (g < b ? 6 : 0);
-        break;
-      case g:
-        h = (b - r) / d + 2;
-        break;
-      default:
-        h = (r - g) / d + 4;
-        break;
-    }
-    h /= 6;
-  }
-
-  return [h, s, l];
-}
-
-function hslToRgb([h, s, l]) {
-  if (s === 0) {
-    const value = l * 255;
-    return [value, value, value];
-  }
-
-  const hue2rgb = (p, q, t) => {
-    if (t < 0) t += 1;
-    if (t > 1) t -= 1;
-    if (t < 1 / 6) return p + (q - p) * 6 * t;
-    if (t < 1 / 2) return q;
-    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-    return p;
-  };
-
-  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  const p = 2 * l - q;
-  return [
-    hue2rgb(p, q, h + 1 / 3) * 255,
-    hue2rgb(p, q, h) * 255,
-    hue2rgb(p, q, h - 1 / 3) * 255,
-  ];
-}
-
-function buildThemeFromColor(rgb) {
-  const [h, s, l] = rgbToHsl(rgb);
-  const saturation = clamp(s, 0.28, 0.78);
-
-  return {
-    main: hslToRgb([h, saturation, clamp(l, 0.32, 0.46)]),
-    dark: hslToRgb([h, clamp(saturation * 0.86, 0.22, 0.64), 0.08]),
-    soft: hslToRgb([h, clamp(saturation * 0.92, 0.38, 0.82), 0.68]),
-  };
-}
-
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.decoding = 'async';
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('封面图片加载失败'));
-    img.src = src;
-  });
-}
-
-function getDominantColorFromImage(img) {
-  const size = 64;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) throw new Error('当前浏览器不支持封面取色');
-
-  ctx.drawImage(img, 0, 0, size, size);
-  const { data } = ctx.getImageData(0, 0, size, size);
-  const buckets = new Map();
-  let fallback = [0, 0, 0];
-  let fallbackWeight = 0;
-
-  for (let i = 0; i < data.length; i += 4) {
-    const alpha = data[i + 3];
-    if (alpha < 180) continue;
-
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const lightness = (max + min) / 2;
-    const saturation = max === 0 ? 0 : (max - min) / max;
-
-    if (lightness < 10 || lightness > 246) continue;
-
-    const fallbackScore = 1 + saturation;
-    fallback[0] += r * fallbackScore;
-    fallback[1] += g * fallbackScore;
-    fallback[2] += b * fallbackScore;
-    fallbackWeight += fallbackScore;
-
-    if (saturation < 0.08 || lightness < 28 || lightness > 232) continue;
-
-    const key = `${r >> 4},${g >> 4},${b >> 4}`;
-    const vividness = saturation * 1.7;
-    const midTone = 1 - Math.min(1, Math.abs(lightness - 128) / 128);
-    const score = 1 + vividness + midTone;
-    const bucket = buckets.get(key) || { r: 0, g: 0, b: 0, weight: 0, count: 0 };
-    bucket.r += r * score;
-    bucket.g += g * score;
-    bucket.b += b * score;
-    bucket.weight += score;
-    bucket.count += 1;
-    buckets.set(key, bucket);
-  }
-
-  let best = null;
-  for (const bucket of buckets.values()) {
-    if (!best || bucket.weight > best.weight) best = bucket;
-  }
-
-  if (best?.weight) return [best.r / best.weight, best.g / best.weight, best.b / best.weight];
-  if (fallbackWeight) return fallback.map(value => value / fallbackWeight);
-  throw new Error('封面没有可用于取色的像素');
-}
-
-function applyThemeToInlinePlayer(theme) {
-  if (!inlinePlayer.root) return;
-  const page = inlinePlayer.root.querySelector('.share-page');
-  for (const target of [inlinePlayer.root, page].filter(Boolean)) {
-    target.style.setProperty('--share-theme-rgb', rgbToCss(theme.main));
-    target.style.setProperty('--share-theme-dark-rgb', rgbToCss(theme.dark));
-    target.style.setProperty('--share-theme-soft-rgb', rgbToCss(theme.soft));
-  }
-}
-
-function clearInlinePlayerTheme() {
-  if (!inlinePlayer.root) return;
-  const page = inlinePlayer.root.querySelector('.share-page');
-  for (const target of [inlinePlayer.root, page].filter(Boolean)) {
-    target.style.removeProperty('--share-theme-rgb');
-    target.style.removeProperty('--share-theme-dark-rgb');
-    target.style.removeProperty('--share-theme-soft-rgb');
-  }
-}
-
-async function applyInlineThemeFromCover(coverUrl, metadataToken = inlinePlayer.metadataToken) {
-  const proxyUrl = getImageProxyUrl(coverUrl);
-  if (!proxyUrl) return;
-
-  try {
-    const img = await loadImage(proxyUrl);
-    if (metadataToken !== inlinePlayer.metadataToken) return;
-    const dominantColor = getDominantColorFromImage(img);
-    if (metadataToken !== inlinePlayer.metadataToken) return;
-    applyThemeToInlinePlayer(buildThemeFromColor(dominantColor));
-  } catch (err) {
-    console.warn('[Inline Player] cover theme extraction failed:', err);
-  }
 }
 
 function isWeChatBrowser() {
@@ -1589,15 +1412,11 @@ async function createShareLink(song, options = {}) {
       console.log('[Share Resolution]', val);
     }
   };
-  const { downloadUrl, resolution, finalFilename } = await createDownloadLinkWithFallback(song, '128k', displayFilename, statusText);
-  const resolvedSong = resolution.resolvedSong || song;
-  const coverUrl = await getBestCoverUrl(resolvedSong);
-  let lyrics = [];
-  try {
-    lyrics = await fetchLyrics(resolvedSong);
-  } catch (err) {
-    console.warn('[Share] lyric preload failed:', err);
-  }
+  const { downloadUrl, resolution, finalFilename } = await createDownloadLinkWithFallback(song, '128k', displayFilename, statusText, {
+    validate: true,
+    includeCover: false,
+  });
+  const resolvedSong = resolution?.resolvedSong || song;
 
   return buildSharePageUrl({
     entry: options.entry || 'share',
@@ -1618,12 +1437,14 @@ async function createShareLink(song, options = {}) {
       img: resolvedSong.img || song.img || '',
       strMediaMid: resolvedSong.strMediaMid || song.strMediaMid || '',
       albumMid: resolvedSong.albumMid || song.albumMid || '',
-      cover: coverUrl || '',
+      types: resolvedSong.types?.length ? resolvedSong.types : (song.types || []),
+      _types: Object.keys(resolvedSong._types || {}).length ? resolvedSong._types : (song._types || {}),
+      typeUrl: resolvedSong.typeUrl || song.typeUrl || {},
+      cover: resolvedSong.cover || resolvedSong.img || song.cover || song.img || '',
     },
     audioUrl: toAbsoluteUrl(getPlaybackDownloadUrl(downloadUrl)),
     downloadUrl: toAbsoluteUrl(downloadUrl),
     filename: finalFilename || displayFilename,
-    lyrics: Array.isArray(lyrics) ? lyrics.slice(0, 180) : [],
   });
 }
 
@@ -2813,653 +2634,71 @@ function buildCurrentPlaybackPageUrl(song) {
   });
 }
 
-const inlinePlayer = {
-  root: null,
-  active: false,
-  isSeeking: false,
-  frameId: 0,
-  lyricIndex: -1,
-  lyricDrag: null,
-  metadataToken: 0,
-  els: {},
-};
-
-function ensureInlinePlayerOverlay() {
-  if (inlinePlayer.root) return inlinePlayer;
-
-  const root = document.createElement('div');
-  root.id = 'inlinePlayerOverlay';
-  root.className = 'inline-player-overlay';
-  root.setAttribute('aria-hidden', 'true');
-  root.innerHTML = `
-    <main class="share-page inline-player-page">
-      <img id="inlinePlayerBgCover" class="share-bg-cover" alt="" aria-hidden="true">
-      <div class="share-bg-layer" aria-hidden="true"></div>
-      <button id="inlinePlayerBackBtn" class="share-back-btn" type="button" title="返回搜索结果" aria-label="返回搜索结果">
-        <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-          <path d="M19 12H5"/>
-          <path d="m12 19-7-7 7-7"/>
-        </svg>
-      </button>
-
-      <section class="share-cover-stage" aria-label="歌曲封面">
-        <div class="share-cover-frame">
-          <div id="inlinePlayerCoverPlaceholder" class="share-cover-placeholder">♪</div>
-          <img id="inlinePlayerCover" class="share-cover" alt="歌曲封面">
-        </div>
-      </section>
-
-      <section class="share-player-panel" aria-label="播放界面">
-        <div class="share-song-info">
-          <h1 id="inlinePlayerTitle" class="share-title">歌曲</h1>
-          <div id="inlinePlayerArtist" class="share-artist">歌手</div>
-          <div id="inlinePlayerLyricList" class="share-lyric-list">
-            <div class="share-lyric-row previous"><span class="share-lyric-text"></span><span class="share-lyric-fill" aria-hidden="true"></span></div>
-            <div class="share-lyric-row active"><span class="share-lyric-text">歌词加载中...</span><span class="share-lyric-fill" aria-hidden="true">歌词加载中...</span></div>
-            <div class="share-lyric-row next"><span class="share-lyric-text"></span><span class="share-lyric-fill" aria-hidden="true"></span></div>
-          </div>
-        </div>
-
-        <div class="share-progress-wrap">
-          <div class="share-progress-times">
-            <span id="inlinePlayerCurrentTime">00:00</span>
-            <span id="inlinePlayerDuration">00:00</span>
-          </div>
-          <input id="inlinePlayerProgressSlider" class="share-progress-slider" type="range" min="0" max="100" value="0" step="0.1" aria-label="播放进度">
-        </div>
-        <div class="share-control-row">
-          <button id="inlinePlayerHomeBtn" class="share-panel-icon-btn" type="button" title="返回搜索结果" aria-label="返回搜索结果">
-            <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <path d="M19 12H5"/>
-              <path d="m12 19-7-7 7-7"/>
-            </svg>
-          </button>
-          <button id="inlinePlayerPlayBtn" class="share-play-toggle" type="button" title="播放" aria-label="播放">
-            <svg class="share-play-icon" width="34" height="34" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M8 5v14l11-7z"/>
-            </svg>
-            <svg class="share-pause-icon" width="34" height="34" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
-            </svg>
-          </button>
-          <button id="inlinePlayerDownloadBtn" class="share-panel-icon-btn" type="button" title="下载" aria-label="下载">
-            <svg width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <path d="M7 10l5 5 5-5"/>
-              <path d="M12 15V3"/>
-            </svg>
-          </button>
-        </div>
-        <p id="inlinePlayerHint" class="share-hint"></p>
-      </section>
-    </main>
-  `;
-
-  document.body.appendChild(root);
-  inlinePlayer.root = root;
-  inlinePlayer.els = {
-    bgCover: root.querySelector('#inlinePlayerBgCover'),
-    cover: root.querySelector('#inlinePlayerCover'),
-    coverPlaceholder: root.querySelector('#inlinePlayerCoverPlaceholder'),
-    backBtn: root.querySelector('#inlinePlayerBackBtn'),
-    homeBtn: root.querySelector('#inlinePlayerHomeBtn'),
-    playBtn: root.querySelector('#inlinePlayerPlayBtn'),
-    downloadBtn: root.querySelector('#inlinePlayerDownloadBtn'),
-    title: root.querySelector('#inlinePlayerTitle'),
-    artist: root.querySelector('#inlinePlayerArtist'),
-    lyricList: root.querySelector('#inlinePlayerLyricList'),
-    slider: root.querySelector('#inlinePlayerProgressSlider'),
-    currentTime: root.querySelector('#inlinePlayerCurrentTime'),
-    duration: root.querySelector('#inlinePlayerDuration'),
-    hint: root.querySelector('#inlinePlayerHint'),
-  };
-
-  inlinePlayer.els.backBtn?.addEventListener('click', closeInlinePlayerOverlay);
-  inlinePlayer.els.homeBtn?.addEventListener('click', closeInlinePlayerOverlay);
-  inlinePlayer.els.playBtn?.addEventListener('click', async () => {
-    try {
-      if (audio.paused) {
-        await audio.play();
-      } else {
-        audio.pause();
-      }
-    } catch (err) {
-      if (inlinePlayer.els.hint) inlinePlayer.els.hint.textContent = `播放失败: ${err.message}`;
+const inlinePlayer = createPlayerPageController({
+  idPrefix: 'inlinePlayer',
+  overlay: true,
+  rootId: 'inlinePlayerOverlay',
+  rootClassName: 'inline-player-overlay',
+  pageClassName: 'inline-player-page',
+  panelLabel: '播放界面',
+  backLabel: '返回搜索结果',
+  homeLabel: '返回搜索结果',
+  homeIcon: 'back',
+  showTopBack: false,
+  logPrefix: '[Inline Player]',
+  getAudio: () => audio,
+  getCurrentTime: () => audio.currentTime,
+  getDuration: () => audio.duration,
+  getEstimatedDuration: () => intervalToSeconds(activePlaybackContext?.song?.interval),
+  getLyrics: () => activeLyrics,
+  seek: (time) => {
+    audio.currentTime = time;
+  },
+  playPause: async () => {
+    if (audio.paused) {
+      await audio.play();
+    } else {
+      audio.pause();
     }
-  });
-  inlinePlayer.els.downloadBtn?.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
+  },
+  download: () => {
     if (!activePlaybackContext?.song) return;
     openDownloadModal(activePlaybackContext.song);
-  });
+  },
+  back: closeInlinePlayerOverlay,
+  home: closeInlinePlayerOverlay,
+  lookupCover: getBestCoverUrl,
+  themeTargets: ({ root, page }) => [root, page].filter(Boolean),
+});
 
-  inlinePlayer.els.slider?.addEventListener('input', () => {
-    inlinePlayer.isSeeking = true;
-    stopInlinePlayerFrame();
-    const percent = Number(inlinePlayer.els.slider.value || 0);
-    inlinePlayer.els.slider.style.setProperty('--share-progress', `${percent}%`);
-    const duration = getFiniteSeconds(audio.duration);
-    const seekTime = duration ? (percent / 100) * duration : 0;
-    if (inlinePlayer.els.currentTime && duration) inlinePlayer.els.currentTime.textContent = formatTime(seekTime);
-    syncInlinePlayerLyrics(seekTime, duration);
-  });
-
-  const commitInlineSeek = () => {
-    const duration = getFiniteSeconds(audio.duration);
-    if (duration) audio.currentTime = (Number(inlinePlayer.els.slider.value || 0) / 100) * duration;
-    inlinePlayer.isSeeking = false;
-    updateInlinePlayerProgress();
-    syncInlinePlayerLyrics(audio.currentTime, audio.duration);
-    if (!audio.paused && !audio.ended) startInlinePlayerFrame();
-  };
-  inlinePlayer.els.slider?.addEventListener('change', commitInlineSeek);
-  inlinePlayer.els.slider?.addEventListener('pointerup', commitInlineSeek);
-  inlinePlayer.els.slider?.addEventListener('touchend', commitInlineSeek);
-  inlinePlayer.els.lyricList?.addEventListener('pointerdown', startInlineLyricDrag);
-  inlinePlayer.els.lyricList?.addEventListener('pointermove', moveInlineLyricDrag);
-  inlinePlayer.els.lyricList?.addEventListener('pointerup', commitInlineLyricDrag);
-  inlinePlayer.els.lyricList?.addEventListener('pointercancel', cancelInlineLyricDrag);
-  window.addEventListener('resize', () => {
-    if (inlinePlayer.active) syncInlinePlayerLyrics(audio.currentTime, audio.duration);
-  });
-  window.visualViewport?.addEventListener('resize', () => {
-    if (inlinePlayer.active) syncInlinePlayerLyrics(audio.currentTime, audio.duration);
-  });
-
+function ensureInlinePlayerOverlay() {
+  inlinePlayer.ensureMounted();
   return inlinePlayer;
 }
 
 function closeInlinePlayerOverlay() {
-  if (!inlinePlayer.root) return;
-  finishInlineLyricDrag({ commit: false });
-  inlinePlayer.active = false;
-  inlinePlayer.isSeeking = false;
-  inlinePlayer.root.classList.remove('active');
-  inlinePlayer.root.setAttribute('aria-hidden', 'true');
+  inlinePlayer.close();
   document.body.classList.remove('inline-player-open');
-  stopInlinePlayerFrame();
 }
 
 function setInlinePlayerPlayState(isPlaying) {
-  inlinePlayer.els.playBtn?.classList.toggle('playing', Boolean(isPlaying));
-}
-
-function updateInlinePlayerMetadata() {
-  if (!inlinePlayer.root || !activePlaybackContext?.song) return;
-  const song = activePlaybackContext.song;
-  const metadataToken = ++inlinePlayer.metadataToken;
-  inlinePlayer.els.title.textContent = song.name || '未知歌曲';
-  inlinePlayer.els.artist.textContent = song.singer || '未知歌手';
-
-  const applyCover = (coverUrl) => {
-    if (metadataToken !== inlinePlayer.metadataToken) return;
-    if (!coverUrl || !/^https?:\/\//i.test(coverUrl)) return;
-
-    const proxiedCover = getImageProxyUrl(coverUrl);
-    const displayCover = proxiedCover || coverUrl;
-    song.cover = coverUrl;
-    song.img = song.img || coverUrl;
-
-    inlinePlayer.els.cover.src = displayCover;
-    inlinePlayer.els.cover.style.display = 'block';
-    inlinePlayer.els.coverPlaceholder.style.display = 'none';
-    inlinePlayer.els.cover.onerror = () => {
-      if (metadataToken !== inlinePlayer.metadataToken) return;
-      if (displayCover !== coverUrl && inlinePlayer.els.cover.src !== coverUrl) {
-        inlinePlayer.els.cover.src = coverUrl;
-        return;
-      }
-      inlinePlayer.els.cover.style.display = 'none';
-      inlinePlayer.els.coverPlaceholder.style.display = 'flex';
-    };
-
-    let bgUsingFallback = false;
-    inlinePlayer.els.bgCover.src = displayCover;
-    inlinePlayer.els.bgCover.onload = () => {
-      if (metadataToken === inlinePlayer.metadataToken) inlinePlayer.els.bgCover.classList.add('loaded');
-    };
-    inlinePlayer.els.bgCover.onerror = () => {
-      if (metadataToken !== inlinePlayer.metadataToken) return;
-      if (!bgUsingFallback && displayCover !== coverUrl) {
-        bgUsingFallback = true;
-        inlinePlayer.els.bgCover.src = coverUrl;
-        return;
-      }
-      if (metadataToken === inlinePlayer.metadataToken) inlinePlayer.els.bgCover.classList.remove('loaded');
-    };
-    applyInlineThemeFromCover(coverUrl, metadataToken);
-  };
-
-  const coverUrl = getSongCoverUrl(song);
-  inlinePlayer.els.cover.classList.remove('loaded');
-  inlinePlayer.els.bgCover.classList.remove('loaded');
-
-  if (coverUrl) {
-    applyCover(coverUrl);
-  } else {
-    inlinePlayer.els.cover.removeAttribute('src');
-    inlinePlayer.els.bgCover.removeAttribute('src');
-    inlinePlayer.els.cover.style.display = 'none';
-    inlinePlayer.els.coverPlaceholder.style.display = 'flex';
-  }
-
-  getBestCoverUrl(song).then((bestCoverUrl) => {
-    if (metadataToken !== inlinePlayer.metadataToken) return;
-    const resolvedCoverUrl = bestCoverUrl || getSongCoverUrl(song);
-    if (resolvedCoverUrl && resolvedCoverUrl !== coverUrl) {
-      song.cover = resolvedCoverUrl;
-      song.img = resolvedCoverUrl;
-      applyCover(resolvedCoverUrl);
-    } else if (!coverUrl) {
-      clearInlinePlayerTheme();
-    }
-  }).catch((err) => {
-    console.warn('[Inline Player] cover lookup failed:', err.message);
-    if (metadataToken === inlinePlayer.metadataToken && !coverUrl) clearInlinePlayerTheme();
-  });
+  inlinePlayer.setPlayState(isPlaying);
 }
 
 function updateInlinePlayerProgress() {
-  if (!inlinePlayer.active || inlinePlayer.isSeeking) return;
-  const duration = getFiniteSeconds(audio.duration);
-  const currentTime = getFiniteSeconds(audio.currentTime);
-  const percent = duration ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
-  if (inlinePlayer.els.slider) {
-    inlinePlayer.els.slider.value = percent;
-    inlinePlayer.els.slider.style.setProperty('--share-progress', `${percent}%`);
-  }
-  if (inlinePlayer.els.currentTime) inlinePlayer.els.currentTime.textContent = formatTime(currentTime);
-  if (inlinePlayer.els.duration) inlinePlayer.els.duration.textContent = formatTime(duration);
-}
-
-function getInlineLyricIndexAtTime(time) {
-  if (!activeLyrics.length) return -1;
-  let index = activeLyrics.findIndex(line => line.time > time);
-  return index === -1 ? activeLyrics.length - 1 : Math.max(0, index - 1);
-}
-
-function getInlineLyricWindow(time, duration) {
-  if (!activeLyrics.length) return null;
-  const index = getInlineLyricIndexAtTime(time);
-  const start = activeLyrics[index]?.time ?? 0;
-  const end = activeLyrics[index + 1]?.time ?? duration;
-  const lineDuration = Math.max(0.8, (Number.isFinite(end) ? end : start + 4) - start);
-  return {
-    index,
-    progress: Math.max(0, Math.min(1, (time - start) / lineDuration)),
-  };
-}
-
-const INLINE_LYRIC_SLIDE_DURATION_MS = 460;
-
-function clearInlineLyricSlide(list) {
-  if (list?._lyricSlideTimer) {
-    window.clearTimeout(list._lyricSlideTimer);
-    list._lyricSlideTimer = 0;
-  }
-  list?.classList.remove('is-sliding');
-}
-
-function ensureInlineLyricParts(row) {
-  let text = row.querySelector('.share-lyric-text');
-  if (!text) {
-    text = document.createElement('span');
-    text.className = 'share-lyric-text';
-    row.appendChild(text);
-  }
-
-  let fill = row.querySelector('.share-lyric-fill');
-  if (!fill) {
-    fill = document.createElement('span');
-    fill.className = 'share-lyric-fill';
-    fill.setAttribute('aria-hidden', 'true');
-    row.appendChild(fill);
-  }
-
-  return { text, fill };
-}
-
-function createInlineLyricRow() {
-  const row = document.createElement('div');
-  row.className = 'share-lyric-row';
-  row.innerHTML = '<span class="share-lyric-text"></span><span class="share-lyric-fill" aria-hidden="true"></span>';
-  ensureInlineLyricParts(row);
-  return row;
-}
-
-function ensureInlineLyricRows(list, count) {
-  const rows = Array.from(list.querySelectorAll('.share-lyric-row'));
-  while (rows.length < count) {
-    const row = createInlineLyricRow();
-    list.appendChild(row);
-    rows.push(row);
-  }
-  return rows;
-}
-
-function getInlineLyricSlotMetrics() {
-  const list = inlinePlayer.els.lyricList;
-  if (!list) return null;
-  const styles = window.getComputedStyle(list);
-  const gap = parseFloat(styles.rowGap || '0') || 0;
-  const rowHeight = Math.max(1, (list.clientHeight - gap * 2) / 3);
-  const step = rowHeight + gap;
-  list.style.setProperty('--lyric-row-height', `${rowHeight}px`);
-  return { step };
-}
-
-function getInlineLyricDragPixelsPerLine(metrics) {
-  const list = inlinePlayer.els.lyricList;
-  const viewportHeight = Math.max(1, list?.clientHeight || metrics.step * 3);
-  const lyricCount = activeLyrics.length || 1;
-  const duration = getFiniteSeconds(audio.duration) || intervalToSeconds(activePlaybackContext?.song?.interval);
-  const linesByCount = Math.round(lyricCount / 8);
-  const linesByDuration = duration ? Math.round(duration / 20) : 0;
-  const linesPerViewport = clamp(Math.max(5, linesByCount, linesByDuration), 5, 30);
-  return Math.max(4, viewportHeight / linesPerViewport);
-}
-
-function setInlineLyricSlot(row, slot, metrics) {
-  row.dataset.slot = String(slot);
-  row.style.setProperty('--lyric-y', `${slot * metrics.step}px`);
-}
-
-function setInlineLyricRole(row, role) {
-  row.classList.remove('previous', 'active', 'next');
-  row.classList.add(role);
-  row.dataset.role = role;
-}
-
-function setInlineLyricContent(row, line, lineIndex, progress = 0) {
-  const { text, fill } = ensureInlineLyricParts(row);
-  const lineText = line?.text || '';
-  text.textContent = lineText;
-  fill.textContent = lineText;
-  row.dataset.lineIndex = String(lineIndex);
-  row.style.setProperty('--karaoke-progress', `${Math.min(1, Math.max(0, progress)) * 100}%`);
-}
-
-function setInlineKaraokeProgress(progress) {
-  const activeRow = inlinePlayer.els.lyricList?.querySelector('.share-lyric-row.active');
-  if (!activeRow) return;
-  const safeProgress = Number.isFinite(progress) ? Math.min(1, Math.max(0, progress)) : 0;
-  activeRow.style.setProperty('--karaoke-progress', `${safeProgress * 100}%`);
-}
-
-function getInlineLyricSeekTime(index) {
-  if (!activeLyrics.length) return 0;
-  const safeIndex = Math.max(0, Math.min(activeLyrics.length - 1, index));
-  const targetTime = Number(activeLyrics[safeIndex]?.time || 0);
-  const duration = getFiniteSeconds(audio.duration);
-  return duration ? Math.min(Math.max(0, targetTime), Math.max(0, duration - 0.05)) : Math.max(0, targetTime);
-}
-
-function previewInlineLyricSeek(index) {
-  if (!inlinePlayer.active || !activeLyrics.length) return;
-  const targetIndex = Math.max(0, Math.min(activeLyrics.length - 1, index));
-  inlinePlayer.lyricIndex = targetIndex;
-  clearInlineLyricSlide(inlinePlayer.els.lyricList);
-  renderInlineLyricWindowNow(inlinePlayer.els.lyricList, activeLyrics, targetIndex, 0);
-
-  const targetTime = getInlineLyricSeekTime(targetIndex);
-  const duration = getFiniteSeconds(audio.duration);
-  const percent = duration ? Math.max(0, Math.min(100, (targetTime / duration) * 100)) : 0;
-  if (inlinePlayer.els.slider) {
-    inlinePlayer.els.slider.value = percent;
-    inlinePlayer.els.slider.style.setProperty('--share-progress', `${percent}%`);
-  }
-  if (inlinePlayer.els.currentTime) inlinePlayer.els.currentTime.textContent = formatTime(targetTime);
-}
-
-function startInlineLyricDrag(event) {
-  if (!inlinePlayer.active || !activeLyrics.length || event.button > 0) return;
-  const metrics = getInlineLyricSlotMetrics();
-  if (!metrics?.step) return;
-
-  event.preventDefault();
-  inlinePlayer.els.lyricList.setPointerCapture?.(event.pointerId);
-  inlinePlayer.isSeeking = true;
-  stopInlinePlayerFrame();
-  clearInlineLyricSlide(inlinePlayer.els.lyricList);
-
-  const currentIndex = Math.max(0, getInlineLyricIndexAtTime(audio.currentTime));
-  inlinePlayer.lyricDrag = {
-    pointerId: event.pointerId,
-    startY: event.clientY,
-    startIndex: currentIndex,
-    targetIndex: currentIndex,
-    pixelsPerLine: getInlineLyricDragPixelsPerLine(metrics),
-  };
-  inlinePlayer.els.lyricList.classList.add('is-dragging');
-  previewInlineLyricSeek(currentIndex);
-}
-
-function moveInlineLyricDrag(event) {
-  const drag = inlinePlayer.lyricDrag;
-  if (!drag || drag.pointerId !== event.pointerId) return;
-
-  event.preventDefault();
-  const offsetRows = Math.round((drag.startY - event.clientY) / drag.pixelsPerLine);
-  const targetIndex = Math.max(0, Math.min(activeLyrics.length - 1, drag.startIndex + offsetRows));
-  if (targetIndex === drag.targetIndex) return;
-
-  drag.targetIndex = targetIndex;
-  previewInlineLyricSeek(targetIndex);
-}
-
-function finishInlineLyricDrag({ commit = false, pointerId } = {}) {
-  const drag = inlinePlayer.lyricDrag;
-  if (!drag) return;
-  if (pointerId != null && drag.pointerId !== pointerId) return;
-
-  try {
-    inlinePlayer.els.lyricList?.releasePointerCapture?.(drag.pointerId);
-  } catch (_) {
-    // Pointer capture may already be released by the browser.
-  }
-  inlinePlayer.els.lyricList?.classList.remove('is-dragging');
-  inlinePlayer.lyricDrag = null;
-  inlinePlayer.isSeeking = false;
-
-  if (commit) {
-    audio.currentTime = getInlineLyricSeekTime(drag.targetIndex);
-  }
-
-  updateInlinePlayerProgress();
-  syncInlinePlayerLyrics(audio.currentTime, audio.duration);
-  if (!audio.paused && !audio.ended) startInlinePlayerFrame();
-}
-
-function commitInlineLyricDrag(event) {
-  event.preventDefault();
-  finishInlineLyricDrag({ commit: true, pointerId: event.pointerId });
-}
-
-function cancelInlineLyricDrag(event) {
-  finishInlineLyricDrag({ commit: false, pointerId: event.pointerId });
-}
-
-function renderInlineLyricWindowNow(list, lyrics, index, progress) {
-  const rows = ensureInlineLyricRows(list, 3);
-  rows.slice(3).forEach(row => row.remove());
-
-  const metrics = getInlineLyricSlotMetrics();
-  if (!metrics) return;
-
-  const roles = ['previous', 'active', 'next'];
-  const lineIndices = index < 0 ? [-2, -1, 0] : [index - 1, index, index + 1];
-  const lines = index < 0
-    ? [null, { text: '暂无歌词' }, null]
-    : lineIndices.map(lineIndex => lyrics[lineIndex] || null);
-
-  rows.slice(0, 3).forEach((row, rowIndex) => {
-    row.classList.remove('is-moving', 'is-exiting', 'no-motion');
-    setInlineLyricRole(row, roles[rowIndex]);
-    setInlineLyricContent(row, lines[rowIndex], lineIndices[rowIndex], rowIndex === 1 ? progress : 0);
-    setInlineLyricSlot(row, rowIndex, metrics);
-  });
-
-  list.dataset.lyricIndex = String(index);
-  setInlineKaraokeProgress(progress);
-}
-
-function slideInlineLyricWindow(list, lyrics, previousIndex, index, progress) {
-  const direction = index > previousIndex ? 1 : -1;
-  const metrics = getInlineLyricSlotMetrics();
-  const previousRow = list.querySelector('.share-lyric-row.previous');
-  const activeRow = list.querySelector('.share-lyric-row.active');
-  const nextRow = list.querySelector('.share-lyric-row.next');
-
-  if (!metrics || !previousRow || !activeRow || !nextRow) {
-    renderInlineLyricWindowNow(list, lyrics, index, progress);
-    return;
-  }
-
-  clearInlineLyricSlide(list);
-  list.classList.add('is-sliding');
-
-  [previousRow, activeRow, nextRow].forEach((row, slot) => {
-    row.classList.remove('is-moving', 'is-exiting', 'no-motion');
-    setInlineLyricSlot(row, slot, metrics);
-  });
-
-  const enteringRow = createInlineLyricRow();
-  enteringRow.classList.add('no-motion');
-  list.appendChild(enteringRow);
-
-  if (direction > 0) {
-    setInlineLyricRole(enteringRow, 'next');
-    setInlineLyricContent(enteringRow, lyrics[index + 1] || null, index + 1, 0);
-    setInlineLyricSlot(enteringRow, 3, metrics);
-  } else {
-    setInlineLyricRole(enteringRow, 'previous');
-    setInlineLyricContent(enteringRow, lyrics[index - 1] || null, index - 1, 0);
-    setInlineLyricSlot(enteringRow, -1, metrics);
-  }
-
-  void list.offsetHeight;
-  [previousRow, activeRow, nextRow, enteringRow].forEach(row => {
-    row.classList.remove('no-motion');
-    row.classList.add('is-moving');
-  });
-
-  if (direction > 0) {
-    previousRow.classList.add('is-exiting');
-    setInlineLyricRole(previousRow, 'previous');
-    setInlineLyricSlot(previousRow, -1, metrics);
-
-    setInlineLyricRole(activeRow, 'previous');
-    setInlineLyricContent(activeRow, lyrics[index - 1] || null, index - 1, 0);
-    setInlineLyricSlot(activeRow, 0, metrics);
-
-    setInlineLyricRole(nextRow, 'active');
-    setInlineLyricContent(nextRow, lyrics[index] || null, index, progress);
-    setInlineLyricSlot(nextRow, 1, metrics);
-
-    setInlineLyricRole(enteringRow, 'next');
-    setInlineLyricSlot(enteringRow, 2, metrics);
-  } else {
-    nextRow.classList.add('is-exiting');
-    setInlineLyricRole(nextRow, 'next');
-    setInlineLyricSlot(nextRow, 3, metrics);
-
-    setInlineLyricRole(activeRow, 'next');
-    setInlineLyricContent(activeRow, lyrics[index + 1] || null, index + 1, 0);
-    setInlineLyricSlot(activeRow, 2, metrics);
-
-    setInlineLyricRole(previousRow, 'active');
-    setInlineLyricContent(previousRow, lyrics[index] || null, index, progress);
-    setInlineLyricSlot(previousRow, 1, metrics);
-
-    setInlineLyricRole(enteringRow, 'previous');
-    setInlineLyricSlot(enteringRow, 0, metrics);
-  }
-
-  list.dataset.lyricIndex = String(index);
-  setInlineKaraokeProgress(progress);
-
-  list._lyricSlideTimer = window.setTimeout(() => {
-    const rows = direction > 0
-      ? [activeRow, nextRow, enteringRow]
-      : [enteringRow, previousRow, activeRow];
-    const exitRow = direction > 0 ? previousRow : nextRow;
-    const nextMetrics = getInlineLyricSlotMetrics();
-
-    exitRow.remove();
-    rows.forEach((row, slot) => {
-      row.classList.remove('is-moving', 'is-exiting', 'no-motion');
-      setInlineLyricRole(row, ['previous', 'active', 'next'][slot]);
-      if (nextMetrics) setInlineLyricSlot(row, slot, nextMetrics);
-    });
-
-    list.classList.remove('is-sliding');
-    list._lyricSlideTimer = 0;
-  }, INLINE_LYRIC_SLIDE_DURATION_MS);
-}
-
-function updateInlineLyricWindow(lyrics, index, initialProgress = 0) {
-  const list = inlinePlayer.els.lyricList;
-  if (!list) return;
-
-  const progress = Number.isFinite(initialProgress) ? Math.min(1, Math.max(0, initialProgress)) : 0;
-  if (!lyrics.length || index < 0) {
-    clearInlineLyricSlide(list);
-    renderInlineLyricWindowNow(list, [], -1, 0);
-    return;
-  }
-
-  const previousIndex = Number(list.dataset.lyricIndex);
-  const isAdjacentMove = Number.isFinite(previousIndex) && Math.abs(index - previousIndex) === 1;
-  const canSlide = isAdjacentMove
-    && !list.classList.contains('is-sliding')
-    && list.querySelectorAll('.share-lyric-row').length === 3;
-
-  if (canSlide) {
-    slideInlineLyricWindow(list, lyrics, previousIndex, index, progress);
-  } else {
-    clearInlineLyricSlide(list);
-    renderInlineLyricWindowNow(list, lyrics, index, progress);
-  }
+  inlinePlayer.updateProgress();
 }
 
 function syncInlinePlayerLyrics(time = audio.currentTime, duration = audio.duration) {
-  if (inlinePlayer.lyricDrag) return;
-  if (!inlinePlayer.active || !inlinePlayer.els.lyricList) return;
-  if (!activeLyrics.length) {
-    updateInlineLyricWindow([], -1, 0);
-    return;
-  }
-
-  const lyric = getInlineLyricWindow(time, duration);
-  if (!lyric) return;
-  if (lyric.index !== inlinePlayer.lyricIndex) {
-    inlinePlayer.lyricIndex = lyric.index;
-    updateInlineLyricWindow(activeLyrics, lyric.index, lyric.progress);
-  } else {
-    setInlineKaraokeProgress(lyric.progress);
-  }
+  inlinePlayer.syncLyrics(time, duration);
 }
 
 function stopInlinePlayerFrame() {
-  if (!inlinePlayer.frameId) return;
-  cancelAnimationFrame(inlinePlayer.frameId);
-  inlinePlayer.frameId = 0;
+  inlinePlayer.stopFrame();
 }
 
 function startInlinePlayerFrame() {
-  if (!inlinePlayer.active) return;
-  stopInlinePlayerFrame();
-  const tick = () => {
-    if (!inlinePlayer.lyricDrag) {
-      updateInlinePlayerProgress();
-      syncInlinePlayerLyrics(audio.currentTime, audio.duration);
-    }
-    if (inlinePlayer.active && !audio.paused && !audio.ended) {
-      inlinePlayer.frameId = requestAnimationFrame(tick);
-    }
-  };
-  inlinePlayer.frameId = requestAnimationFrame(tick);
+  inlinePlayer.startFrame();
 }
 
 function openInlinePlayerOverlay(song) {
@@ -3468,18 +2707,12 @@ function openInlinePlayerOverlay(song) {
   }
 
   ensureInlinePlayerOverlay();
-  inlinePlayer.active = true;
-  inlinePlayer.lyricIndex = -1;
-  inlinePlayer.root.classList.add('active');
-  inlinePlayer.root.setAttribute('aria-hidden', 'false');
   document.body.classList.add('inline-player-open');
-  updateInlinePlayerMetadata();
-  if (!inlinePlayer.lyricDrag) updateInlinePlayerProgress();
-  setInlinePlayerPlayState(!audio.paused && !audio.ended);
-  syncInlinePlayerLyrics(audio.currentTime, audio.duration);
-  if (!audio.paused && !audio.ended) startInlinePlayerFrame();
+  inlinePlayer.open({
+    song: activePlaybackContext?.song || song,
+    lyrics: activeLyrics,
+  });
 }
-
 function restorePlaybackStateSnapshot() {
   const snapshot = readPlaybackStateSnapshot();
   if (!snapshot?.audioUrl || !snapshot?.song) return false;
@@ -3575,14 +2808,14 @@ audio.addEventListener('timeupdate', () => {
       activeLyricLineEl.innerText = activeLyrics[index].text || ' ';
     }
   }
-  if (!inlinePlayer.lyricDrag) syncInlinePlayerLyrics(audio.currentTime, audio.duration);
+  if (!inlinePlayer.isLyricDragging()) syncInlinePlayerLyrics(audio.currentTime, audio.duration);
 });
 
 audio.addEventListener('loadedmetadata', () => {
   if (activeSongId && activeTotalTimeText) {
     activeTotalTimeText.innerText = formatTime(audio.duration);
   }
-  if (!inlinePlayer.lyricDrag) {
+  if (!inlinePlayer.isLyricDragging()) {
     updateInlinePlayerProgress();
     syncInlinePlayerLyrics(audio.currentTime, audio.duration);
   }
@@ -3649,9 +2882,10 @@ function formatTime(seconds) {
 }
 
 function triggerLyricScrollSync() {
-  if (inlinePlayer.lyricDrag) return;
+  if (inlinePlayer.isLyricDragging()) return;
   lastLyricIndex = -1;
-  inlinePlayer.lyricIndex = -1;
+  inlinePlayer.setLyrics(activeLyrics);
+  inlinePlayer.resetLyricIndex();
   const e = new Event('timeupdate');
   audio.dispatchEvent(e);
 }
