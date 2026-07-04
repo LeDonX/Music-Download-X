@@ -1140,6 +1140,60 @@ async function fetchSourceSearch(keyword, source, limit = 25) {
   }
 }
 
+function collectRankedAlternativeSearchResults(song, quality, data, seen) {
+  const ranked = [];
+  for (const candidate of data?.list || []) {
+    const score = rankAlternativeSong(song, candidate, quality);
+    if (score < 0) continue;
+    const key = `${candidate.source}_${candidate.songmid}_${candidate.hash || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    ranked.push({ ...candidate, _fallbackScore: score });
+  }
+  return ranked;
+}
+
+function rankAlternativeSearchResults(song, quality, data, seen) {
+  return collectRankedAlternativeSearchResults(song, quality, data, seen)
+    .sort((a, b) => b._fallbackScore - a._fallbackScore)
+    .map(({ _fallbackScore, ...candidate }) => candidate);
+}
+
+function createAlternativeSongCollector(song, quality) {
+  const keyword = `${song.name || ''} ${song.singer || ''}`.trim();
+  const seen = new Set();
+  let pending = [];
+
+  if (keyword) {
+    pending = PLATFORM_IDS
+      .filter(source => source !== song.source)
+      .map(source => ({
+        source,
+        promise: fetchSourceSearch(keyword, source),
+      }));
+  }
+
+  return {
+    async nextBatch() {
+      while (pending.length) {
+        const result = await Promise.race(pending.map(entry => entry.promise.then(data => ({ entry, data }))));
+        pending = pending.filter(entry => entry !== result.entry);
+        const candidates = rankAlternativeSearchResults(song, quality, result.data, seen);
+        if (candidates.length) return candidates;
+      }
+      return [];
+    },
+    async all() {
+      const candidates = [];
+      while (pending.length) {
+        const batch = await this.nextBatch();
+        candidates.push(...batch);
+      }
+      return candidates;
+    },
+  };
+}
+
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -1236,14 +1290,7 @@ async function findAlternativeSongs(song, quality) {
   const seen = new Set();
 
   results.forEach((data) => {
-    for (const candidate of data?.list || []) {
-      const score = rankAlternativeSong(song, candidate, quality);
-      if (score < 0) continue;
-      const key = `${candidate.source}_${candidate.songmid}_${candidate.hash || ''}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      ranked.push({ ...candidate, _fallbackScore: score });
-    }
+    ranked.push(...collectRankedAlternativeSearchResults(song, quality, data, seen));
   });
 
   return ranked.sort((a, b) => b._fallbackScore - a._fallbackScore).map(({ _fallbackScore, ...candidate }) => candidate);
@@ -1253,23 +1300,24 @@ function getResolverUrlsToTry() {
   return [state.scriptUrl, ...SOURCE_URLS.filter(u => u !== state.scriptUrl)];
 }
 
-async function loadResolverForDownload(url) {
+async function loadResolverForDownload(url, timeoutMs = RESOLVE_TIMEOUT_MS) {
   const sourceName = getResolverName(url);
   return withTimeout(
     getOrLoadSandbox(url),
-    RESOLVE_TIMEOUT_MS,
+    timeoutMs,
     `${sourceName}加载超时`
   );
 }
 
-async function resolveWithLoadedResolver(url, sandboxInstance, song, quality, statusText, validateResolution) {
+async function resolveWithLoadedResolver(url, sandboxInstance, song, quality, statusText, validateResolution, options = {}) {
+  const timeoutMs = options.resolveTimeoutMs || RESOLVE_TIMEOUT_MS;
   const sourceName = getResolverName(url);
   statusText.innerText = `正在用${sourceName}解析 ${getPlatformName(song.source)}...`;
   console.log(`[Download] Trying resolution with resolver: ${url}, source: ${song.source}`);
 
   const { finalUrl, finalHeaders, finalType } = await withTimeout(
     resolveMusicUrl(sandboxInstance, song, quality),
-    RESOLVE_TIMEOUT_MS,
+    timeoutMs,
     `${sourceName}解析超时`
   );
 
@@ -1288,13 +1336,13 @@ async function resolveWithLoadedResolver(url, sandboxInstance, song, quality, st
   throw new Error('解析服务未返回有效链接');
 }
 
-async function resolveWithScripts(song, quality, statusText, validateResolution) {
+async function resolveWithScripts(song, quality, statusText, validateResolution, options = {}) {
   let lastError = null;
 
   for (const url of getResolverUrlsToTry()) {
     try {
-      const sandboxInstance = await loadResolverForDownload(url);
-      return await resolveWithLoadedResolver(url, sandboxInstance, song, quality, statusText, validateResolution);
+      const sandboxInstance = await loadResolverForDownload(url, options.loadTimeoutMs);
+      return await resolveWithLoadedResolver(url, sandboxInstance, song, quality, statusText, validateResolution, options);
     } catch (err) {
       lastError = err;
       console.warn(`[Download] Resolver ${url} failed for ${song.source}:`, err.message);
@@ -1347,26 +1395,31 @@ async function buildDownloadUrlFromResolution(resolution, quality, filename, son
 async function createDownloadLink(song, quality, filename, statusText, options = {}) {
   return resolveWithScripts(song, quality, statusText, (resolution) => {
     return buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText, options);
-  });
+  }, options);
 }
 
 async function createDownloadLinkWithFallback(song, quality, filename, statusText, options = {}) {
   let lastError = null;
-  let alternativesPromise = null;
+  const {
+    eagerAlternatives = false,
+    loadTimeoutMs = RESOLVE_TIMEOUT_MS,
+    resolveTimeoutMs = RESOLVE_TIMEOUT_MS,
+  } = options;
+  let alternativeCollector = eagerAlternatives ? createAlternativeSongCollector(song, quality) : null;
 
-  const getAlternatives = (sourceName) => {
-    if (!alternativesPromise) {
+  const getAlternativeBatch = async (sourceName) => {
+    if (!alternativeCollector) {
       statusText.innerText = `[${sourceName}] 原平台不可用，正在匹配其它平台...`;
-      alternativesPromise = findAlternativeSongs(song, quality);
+      alternativeCollector = createAlternativeSongCollector(song, quality);
     }
-    return alternativesPromise;
+    return alternativeCollector.nextBatch();
   };
 
   for (const url of getResolverUrlsToTry()) {
     const sourceName = getResolverName(url);
     let sandboxInstance = null;
     try {
-      sandboxInstance = await loadResolverForDownload(url);
+      sandboxInstance = await loadResolverForDownload(url, loadTimeoutMs);
     } catch (err) {
       lastError = err;
       console.warn(`[Download] Resolver ${url} load failed:`, err.message);
@@ -1376,28 +1429,32 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
     try {
       return await resolveWithLoadedResolver(url, sandboxInstance, song, quality, statusText, (resolution) => {
         return buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText, options);
-      });
+      }, { resolveTimeoutMs });
     } catch (err) {
       lastError = err;
       console.warn(`[Download] ${sourceName} original ${song.source} failed:`, err.message);
     }
 
-    const alternatives = await getAlternatives(sourceName);
-    if (!alternatives.length) {
-      console.warn('[Download] no fallback platform candidates found');
-      continue;
+    let triedAlternative = false;
+    while (true) {
+      const alternatives = await getAlternativeBatch(sourceName);
+      if (!alternatives.length) break;
+      triedAlternative = true;
+      for (const candidate of alternatives) {
+        try {
+          statusText.innerText = `[${sourceName}] 正在尝试 ${getPlatformName(candidate.source)}...`;
+          return await resolveWithLoadedResolver(url, sandboxInstance, candidate, quality, statusText, (resolution) => {
+            return buildDownloadUrlFromResolution(resolution, quality, filename, candidate, statusText, options);
+          }, { resolveTimeoutMs });
+        } catch (err) {
+          lastError = err;
+          console.warn(`[Download] ${sourceName} fallback ${candidate.source} failed:`, err.message);
+        }
+      }
     }
 
-    for (const candidate of alternatives) {
-      try {
-        statusText.innerText = `[${sourceName}] 正在尝试 ${getPlatformName(candidate.source)}...`;
-        return await resolveWithLoadedResolver(url, sandboxInstance, candidate, quality, statusText, (resolution) => {
-          return buildDownloadUrlFromResolution(resolution, quality, filename, candidate, statusText, options);
-        });
-      } catch (err) {
-        lastError = err;
-        console.warn(`[Download] ${sourceName} fallback ${candidate.source} failed:`, err.message);
-      }
+    if (!triedAlternative) {
+      console.warn('[Download] no fallback platform candidates found');
     }
   }
 
@@ -2558,43 +2615,28 @@ let lastLyricIndex = -1;
 let isUserSeeking = false;
 let activePlaybackContext = null;
 let playbackGestureUnlocked = false;
-let isUnlockingPlaybackGesture = false;
 
 function unlockPlaybackFromUserGesture() {
   if (playbackGestureUnlocked) return;
   try {
-    const previousVolume = audio.volume;
-    const unlockSrc = USER_GESTURE_UNLOCK_AUDIO_SRC;
-    isUnlockingPlaybackGesture = true;
-    audio.volume = 0;
-    audio.src = unlockSrc;
-    audio.load();
-    const playPromise = audio.play();
+    const unlockAudio = new Audio(USER_GESTURE_UNLOCK_AUDIO_SRC);
+    unlockAudio.volume = 0;
+    unlockAudio.preload = 'auto';
+    const playPromise = unlockAudio.play();
     if (playPromise?.then) {
       playPromise.then(() => {
-        if (audio.currentSrc === unlockSrc || audio.src === unlockSrc) {
-          audio.pause();
-          audio.currentTime = 0;
-        }
-        audio.volume = previousVolume;
+        unlockAudio.pause();
+        unlockAudio.removeAttribute('src');
+        unlockAudio.load();
         playbackGestureUnlocked = true;
-        isUnlockingPlaybackGesture = false;
       }).catch((err) => {
-        audio.volume = previousVolume;
-        isUnlockingPlaybackGesture = false;
         console.warn('[Playback] mobile audio unlock failed:', err.message || err);
       });
     } else {
-      if (audio.currentSrc === unlockSrc || audio.src === unlockSrc) {
-        audio.pause();
-        audio.currentTime = 0;
-      }
-      audio.volume = previousVolume;
+      unlockAudio.pause();
       playbackGestureUnlocked = true;
-      isUnlockingPlaybackGesture = false;
     }
   } catch (err) {
-    isUnlockingPlaybackGesture = false;
     console.warn('[Playback] mobile audio unlock failed:', err.message || err);
   }
 }
@@ -2827,7 +2869,6 @@ function restorePlaybackStateSnapshot() {
 }
 
 audio.addEventListener('timeupdate', () => {
-  if (isUnlockingPlaybackGesture) return;
   if (activeSongId && activeProgressSlider && activeCurrentTimeText && !isUserSeeking) {
     const pct = (audio.currentTime / audio.duration) * 100 || 0;
     activeProgressSlider.value = pct;
@@ -2855,7 +2896,6 @@ audio.addEventListener('timeupdate', () => {
 });
 
 audio.addEventListener('loadedmetadata', () => {
-  if (isUnlockingPlaybackGesture) return;
   if (activeSongId && activeTotalTimeText) {
     activeTotalTimeText.innerText = formatTime(audio.duration);
   }
@@ -2866,7 +2906,6 @@ audio.addEventListener('loadedmetadata', () => {
 });
 
 audio.addEventListener('playing', () => {
-  if (isUnlockingPlaybackGesture) return;
   if (activePlayBtn) {
     activePlayBtn.querySelector('.play-icon').style.display = 'none';
     activePlayBtn.querySelector('.pause-icon').style.display = 'block';
@@ -2881,7 +2920,6 @@ audio.addEventListener('playing', () => {
 });
 
 audio.addEventListener('pause', () => {
-  if (isUnlockingPlaybackGesture) return;
   if (activePlayBtn) {
     activePlayBtn.querySelector('.play-icon').style.display = 'block';
     activePlayBtn.querySelector('.pause-icon').style.display = 'none';
@@ -2895,7 +2933,6 @@ audio.addEventListener('pause', () => {
 });
 
 audio.addEventListener('ended', () => {
-  if (isUnlockingPlaybackGesture) return;
   if (activePlayBtn) {
     activePlayBtn.querySelector('.play-icon').style.display = 'block';
     activePlayBtn.querySelector('.pause-icon').style.display = 'none';
@@ -2913,7 +2950,6 @@ audio.addEventListener('ended', () => {
 });
 
 audio.addEventListener('error', () => {
-  if (isUnlockingPlaybackGesture) return;
   if (activeSongId) {
     console.error('[Audio Error]', audio.error);
     showToast('播放出错，无法加载音频流', 'error');
@@ -3130,6 +3166,9 @@ async function togglePlay(song, itemEl) {
     const { downloadUrl, resolution, finalFilename } = await createDownloadLinkWithFallback(song, '128k', displayFilename, dummyStatusText, {
       validate: false,
       includeCover: false,
+      eagerAlternatives: true,
+      loadTimeoutMs: 8000,
+      resolveTimeoutMs: 8000,
     });
     const playbackSong = resolution?.resolvedSong || song;
     
