@@ -2618,25 +2618,42 @@ let playbackGestureUnlocked = false;
 
 function unlockPlaybackFromUserGesture() {
   if (playbackGestureUnlocked) return;
+  if (activeSongId || audio.currentSrc || audio.getAttribute('src')) return;
+
+  const previousVolume = audio.volume;
+  const previousMuted = audio.muted;
+
   try {
-    const unlockAudio = new Audio(USER_GESTURE_UNLOCK_AUDIO_SRC);
-    unlockAudio.volume = 0;
-    unlockAudio.preload = 'auto';
-    const playPromise = unlockAudio.play();
+    audio.muted = true;
+    audio.preload = 'auto';
+    audio.src = USER_GESTURE_UNLOCK_AUDIO_SRC;
+
+    const cleanup = () => {
+      if (audio.getAttribute('src') === USER_GESTURE_UNLOCK_AUDIO_SRC) {
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
+      }
+      audio.muted = previousMuted;
+      audio.volume = previousVolume;
+    };
+
+    const playPromise = audio.play();
     if (playPromise?.then) {
       playPromise.then(() => {
-        unlockAudio.pause();
-        unlockAudio.removeAttribute('src');
-        unlockAudio.load();
         playbackGestureUnlocked = true;
+        cleanup();
       }).catch((err) => {
+        cleanup();
         console.warn('[Playback] mobile audio unlock failed:', err.message || err);
       });
     } else {
-      unlockAudio.pause();
+      cleanup();
       playbackGestureUnlocked = true;
     }
   } catch (err) {
+    audio.muted = previousMuted;
+    audio.volume = previousVolume;
     console.warn('[Playback] mobile audio unlock failed:', err.message || err);
   }
 }
@@ -3166,7 +3183,6 @@ async function togglePlay(song, itemEl) {
     const { downloadUrl, resolution, finalFilename } = await createDownloadLinkWithFallback(song, '128k', displayFilename, dummyStatusText, {
       validate: false,
       includeCover: false,
-      eagerAlternatives: true,
       loadTimeoutMs: 8000,
       resolveTimeoutMs: 8000,
     });
