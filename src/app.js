@@ -39,6 +39,11 @@ const ORDERED_QUALITIES = new Set(['128k', '320k', 'flac', 'flac24bit']);
 const SEARCH_STATE_STORAGE_KEY = 'music_download_x_search_state';
 const PLAYBACK_STATE_STORAGE_KEY = 'music_download_x_playback_state';
 const SEARCH_STATE_MAX_AGE_MS = 30 * 60 * 1000;
+const DEFAULT_HOME_CHART = {
+  source: 'tx',
+  chart: 'hot',
+  title: 'QQ音乐热歌榜',
+};
 
 // Application State
 const state = {
@@ -51,6 +56,10 @@ const state = {
   totalCount: 0,
   limit: 15,
   currentKeyword: '',
+  currentFeed: 'chart',
+  currentChart: DEFAULT_HOME_CHART.chart,
+  listTitle: DEFAULT_HOME_CHART.title,
+  listUpdatedAt: '',
   isLoading: false,
   activeDownloadTask: null,
   searchRequestId: 0,
@@ -392,7 +401,11 @@ function saveSearchStateSnapshot() {
     sessionStorage.setItem(SEARCH_STATE_STORAGE_KEY, JSON.stringify({
       savedAt: Date.now(),
       currentSource: state.currentSource,
-      currentKeyword: state.currentKeyword || el.searchInput.value.trim(),
+      currentKeyword: state.currentFeed === 'chart' ? '' : (state.currentKeyword || el.searchInput.value.trim()),
+      currentFeed: state.currentFeed,
+      currentChart: state.currentChart,
+      listTitle: state.listTitle,
+      listUpdatedAt: state.listUpdatedAt,
       currentResults: state.currentResults,
       currentPage: state.currentPage,
       totalCount: state.totalCount,
@@ -442,21 +455,26 @@ function restoreSearchStateSnapshot() {
 
   const restoredResults = Array.isArray(snapshot.currentResults) ? snapshot.currentResults : [];
   const restoredKeyword = String(snapshot.currentKeyword || '');
+  const restoredFeed = snapshot.currentFeed === 'chart' ? 'chart' : 'search';
 
   setSelectedPlatformUI(snapshot.currentSource || 'tx');
-  state.currentKeyword = restoredKeyword;
+  state.currentFeed = restoredFeed;
+  state.currentChart = restoredFeed === 'chart' ? (snapshot.currentChart || DEFAULT_HOME_CHART.chart) : '';
+  state.listTitle = snapshot.listTitle || (restoredFeed === 'chart' ? DEFAULT_HOME_CHART.title : '');
+  state.listUpdatedAt = snapshot.listUpdatedAt || '';
+  state.currentKeyword = restoredFeed === 'chart' ? '' : restoredKeyword;
   state.currentResults = restoredResults;
   state.currentPage = Number(snapshot.currentPage || 1);
   state.totalCount = Number(snapshot.totalCount || restoredResults.length || 0);
-  state.activeSearchKey = snapshot.activeSearchKey || getSearchKey(restoredKeyword, state.currentSource);
+  state.activeSearchKey = snapshot.activeSearchKey || getSearchKey(state.currentKeyword, state.currentSource, state.currentChart);
   state.isLoading = false;
   state.loadingMode = '';
   state.searchAbortController = null;
-  el.searchInput.value = restoredKeyword;
+  el.searchInput.value = state.currentKeyword;
   updateClearSearchButton();
   showBottomLoadingIndicator(false);
 
-  if (restoredKeyword && restoredResults.length) {
+  if ((state.currentKeyword || restoredFeed === 'chart') && restoredResults.length) {
     renderSearchResults();
     requestAnimationFrame(() => {
       window.scrollTo({ top: Number(snapshot.scrollTop || 0), left: 0, behavior: 'auto' });
@@ -1199,20 +1217,32 @@ function delay(ms) {
 }
 
 function getSearchParams(page) {
-  return {
-    keyword: state.currentKeyword,
-    source: state.currentSource,
+  const params = {
+    keyword: state.currentFeed === 'chart' ? '' : state.currentKeyword,
+    source: state.currentFeed === 'chart' ? DEFAULT_HOME_CHART.source : state.currentSource,
     page,
     limit: state.limit,
   };
+  if (state.currentFeed === 'chart') {
+    params.chart = state.currentChart || DEFAULT_HOME_CHART.chart;
+  }
+  return params;
 }
 
-function getSearchKey(keyword, source) {
-  return `${source}\u0000${keyword}`;
+function getSearchKey(keyword, source, chart = '') {
+  return chart ? `${source}\u0000chart:${chart}` : `${source}\u0000${keyword}`;
 }
 
 async function fetchSearchData(params, { signal } = {}) {
-  const searchUrl = `/api/search?keyword=${encodeURIComponent(params.keyword)}&source=${params.source}&page=${params.page}&limit=${params.limit}&_=${Date.now()}`;
+  const searchParams = new URLSearchParams({
+    keyword: params.keyword || '',
+    source: params.source,
+    page: String(params.page),
+    limit: String(params.limit),
+    _: String(Date.now()),
+  });
+  if (params.chart) searchParams.set('chart', params.chart);
+  const searchUrl = `/api/search?${searchParams.toString()}`;
   const res = await fetch(searchUrl, {
     signal,
     cache: 'no-store',
@@ -1607,8 +1637,11 @@ async function init() {
 
   // Setup Event Listeners first so search/input elements are immediately active
   setupEventListeners();
-  restoreSearchStateSnapshot();
+  const restoredList = restoreSearchStateSnapshot();
   restorePlaybackStateSnapshot();
+  if (!restoredList) {
+    void loadHomeHotChart();
+  }
 
   // Load Custom Music Source in background
   await loadMusicSource(state.scriptUrl);
@@ -1665,6 +1698,23 @@ function setupEventListeners() {
 
     if (el.searchInput.value.trim()) {
       performSearch();
+    } else if (state.currentFeed === 'chart') {
+      if (state.searchAbortController) {
+        state.searchAbortController.abort();
+        state.searchAbortController = null;
+      }
+      state.searchRequestId += 1;
+      state.currentFeed = 'search';
+      state.currentChart = '';
+      state.listTitle = '';
+      state.listUpdatedAt = '';
+      state.currentResults = [];
+      state.totalCount = 0;
+      state.activeSearchKey = '';
+      state.isLoading = false;
+      state.loadingMode = '';
+      showBottomLoadingIndicator(false);
+      renderInitialEmptyState();
     }
   };
 
@@ -1776,18 +1826,9 @@ function clearSearchInput() {
     state.searchAbortController.abort();
     state.searchAbortController = null;
   }
-  state.searchRequestId += 1;
-  state.currentKeyword = '';
-  state.currentResults = [];
-  state.currentPage = 1;
-  state.totalCount = 0;
-  state.isLoading = false;
-  state.activeSearchKey = '';
-  state.loadingMode = '';
   el.searchInput.value = '';
   updateClearSearchButton();
-  showBottomLoadingIndicator(false);
-  renderInitialEmptyState();
+  void loadHomeHotChart();
   requestAnimationFrame(() => {
     el.searchInput.focus({ preventScroll: true });
   });
@@ -1807,7 +1848,7 @@ function blurInteractiveTarget(e) {
 
 function canLoadNextPage() {
   if (state.isLoading) return false;
-  if (!state.currentKeyword) return false;
+  if (state.currentFeed !== 'chart' && !state.currentKeyword) return false;
   if (state.currentResults.length === 0) return false;
   if (state.currentResults.length >= state.totalCount) return false;
   return true;
@@ -1893,6 +1934,36 @@ async function loadMusicSource(url) {
   }
 }
 
+async function loadHomeHotChart() {
+  const chartKey = getSearchKey('', DEFAULT_HOME_CHART.source, DEFAULT_HOME_CHART.chart);
+  if (state.isLoading && state.activeSearchKey === chartKey) return;
+
+  if (state.searchAbortController) {
+    state.searchAbortController.abort();
+  }
+
+  state.searchRequestId += 1;
+  state.currentFeed = 'chart';
+  state.currentChart = DEFAULT_HOME_CHART.chart;
+  state.currentSource = DEFAULT_HOME_CHART.source;
+  state.currentKeyword = '';
+  state.currentResults = [];
+  state.currentPage = 1;
+  state.totalCount = 0;
+  state.listTitle = DEFAULT_HOME_CHART.title;
+  state.listUpdatedAt = '';
+  state.activeSearchKey = chartKey;
+  state.isLoading = false;
+  state.loadingMode = '';
+  el.searchInput.value = '';
+  setSelectedPlatformUI(DEFAULT_HOME_CHART.source);
+  updateClearSearchButton();
+  showBottomLoadingIndicator(false);
+
+  const params = getSearchParams(state.currentPage);
+  await fetchPage(params, state.searchRequestId);
+}
+
 // Perform Music Search (New search keyword entrypoint)
 async function performSearch() {
   const keyword = el.searchInput.value.trim();
@@ -1908,9 +1979,13 @@ async function performSearch() {
   }
   state.searchRequestId += 1;
   state.currentPage = 1;
+  state.currentFeed = 'search';
+  state.currentChart = '';
   state.currentKeyword = keyword;
   state.currentResults = []; // Clear previous batch
   state.totalCount = 0;
+  state.listTitle = '';
+  state.listUpdatedAt = '';
   state.activeSearchKey = searchKey;
   showBottomLoadingIndicator(false);
   const params = getSearchParams(state.currentPage);
@@ -1923,13 +1998,14 @@ async function fetchPage(params, requestId = state.searchRequestId) {
   state.loadingMode = 'search';
   const controller = new AbortController();
   state.searchAbortController = controller;
+  const isChart = Boolean(params.chart);
   el.songList.innerHTML = `
     <div class="empty-state">
       <div class="loading-spinner" style="width:30px; height:30px;"></div>
-      <p>正在搜寻中...</p>
+      <p>${isChart ? '正在加载 QQ 音乐热歌榜...' : '正在搜寻中...'}</p>
     </div>
   `;
-  el.resultsCount.innerText = '正在搜索...';
+  el.resultsCount.innerText = isChart ? '正在加载热榜...' : '正在搜索...';
 
   try {
     const data = await fetchSearchDataWithRetry(params, requestId, controller, { retryEmpty: true });
@@ -1940,15 +2016,19 @@ async function fetchPage(params, requestId = state.searchRequestId) {
     if (params.page === 1) {
       state.totalCount = data.total || 0;
     }
+    if (params.chart) {
+      state.listTitle = data.titleDetail || data.title || DEFAULT_HOME_CHART.title;
+      state.listUpdatedAt = data.updateTime || data.period || '';
+    }
     
     renderSearchResults();
   } catch (err) {
     if (err.name === 'AbortError' || requestId !== state.searchRequestId) return;
     console.error('[Search Error]', err);
-    showToast('搜索失败，请重试', 'error');
+    showToast(isChart ? '热榜加载失败，请重试' : '搜索失败，请重试', 'error');
     el.songList.innerHTML = `
       <div class="empty-state">
-        <p>搜索失败了，请重试</p>
+        <p>${isChart ? '热榜加载失败，请重试' : '搜索失败了，请重试'}</p>
       </div>
     `;
     el.resultsCount.innerText = '共 0 首歌曲';
@@ -1989,7 +2069,12 @@ async function loadNextPage() {
     } else {
       state.currentPage = nextPage;
       state.currentResults = [...state.currentResults, ...newSongs];
+      if (params.chart) {
+        state.listTitle = data.titleDetail || data.title || state.listTitle || DEFAULT_HOME_CHART.title;
+        state.listUpdatedAt = data.updateTime || data.period || state.listUpdatedAt || '';
+      }
       appendSearchResults(newSongs);
+      renderResultCount();
     }
     success = true;
   } catch (err) {
@@ -2060,9 +2145,19 @@ function showBottomErrorIndicator() {
 }
 
 // Render Search Results
+function renderResultCount() {
+  if (state.currentFeed === 'chart') {
+    const title = state.listTitle || DEFAULT_HOME_CHART.title;
+    const updatedAt = state.listUpdatedAt ? ` · ${state.listUpdatedAt}` : '';
+    el.resultsCount.innerText = `${title}${updatedAt} · 共 ${state.totalCount} 首歌曲`;
+    return;
+  }
+  el.resultsCount.innerText = `共 ${state.totalCount} 首歌曲`;
+}
+
 function renderSearchResults() {
   const list = state.currentResults;
-  el.resultsCount.innerText = `共 ${state.totalCount} 首歌曲`;
+  renderResultCount();
 
   if (list.length === 0) {
     el.songList.innerHTML = `

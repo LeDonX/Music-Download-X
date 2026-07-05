@@ -241,10 +241,136 @@ function addNeteaseQualities(types, _types, song, songmid) {
   types.reverse();
 }
 
+const QQ_HOT_TOP_ID = 26;
+
+function formatQQSingerName(list, fallback = "") {
+  if (Array.isArray(list) && list.length) {
+    return list
+      .map(item => item?.title || item?.name)
+      .filter(Boolean)
+      .join("\u3001");
+  }
+  return String(fallback || "").replace(/\//g, "\u3001");
+}
+
+function mapQQTrackToSong(item, fallback = {}) {
+  const album = item.album || {};
+  const file = item.file || {};
+  const songmid = item.mid || item.songmid || "";
+  const albummid = album.mid || item.albumMid || fallback.albumMid || "";
+  const songId = item.id?.toString?.() || fallback.songId?.toString?.() || "";
+  const types = [];
+  const _types = {};
+
+  addQuality(types, _types, "128k", file.size_128mp3 || 1.2 * 1024 * 1024, { hash: songmid });
+  addQuality(types, _types, "320k", file.size_320mp3, { hash: songmid });
+  addQuality(types, _types, "flac", file.size_flac, { hash: songmid });
+  addQuality(types, _types, "flac24bit", file.size_hires, { hash: songmid });
+
+  const cover = albummid
+    ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${albummid}.jpg`
+    : normalizePicUrl(item.cover || fallback.cover || "");
+
+  return {
+    songmid,
+    name: item.title || item.name || fallback.title || "",
+    singer: formatQQSingerName(item.singer, fallback.singerName),
+    albumName: album.name || album.title || fallback.albumName || "",
+    albumId: albummid,
+    img: cover,
+    interval: formatPlayTime(item.interval || 0),
+    source: "tx",
+    strMediaMid: file.media_mid || "",
+    albumMid: albummid,
+    songId,
+    types,
+    _types,
+    typeUrl: {}
+  };
+}
+
+async function fetchQQHotChart(page, limit, responseHeaders) {
+  const offset = (page - 1) * limit;
+  const requestPayload = {
+    comm: {
+      ct: 24,
+      cv: 0
+    },
+    req_1: {
+      module: "musicToplist.ToplistInfoServer",
+      method: "GetDetail",
+      param: {
+        topId: QQ_HOT_TOP_ID,
+        offset,
+        num: limit
+      }
+    }
+  };
+
+  const chartJson = await retry(async () => {
+    const url = `https://u.y.qq.com/cgi-bin/musicu.fcg?format=json&data=${encodeURIComponent(JSON.stringify(requestPayload))}`;
+    const res = await fetchWithTimeout(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://y.qq.com/"
+      }
+    });
+    if (!res.ok) throw new Error(`QQ Music toplist HTTP ${res.status}`);
+    const body = await res.json();
+    return body?.code === 0 && body?.req_1?.code === 0 ? body : null;
+  }, 3);
+
+  const chart = chartJson?.req_1?.data?.data || {};
+  const chartSongs = Array.isArray(chart.song) ? chart.song : [];
+  const songIds = chartSongs
+    .map(song => Number(song.songId || 0))
+    .filter(Boolean);
+  const detailById = new Map();
+
+  if (songIds.length) {
+    const detailJson = await retry(async () => {
+      const url = `https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songid=${songIds.join(",")}&format=json`;
+      const res = await fetchWithTimeout(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Referer": "https://y.qq.com/"
+        }
+      });
+      if (!res.ok) throw new Error(`QQ Music song detail HTTP ${res.status}`);
+      const body = await res.json();
+      return Array.isArray(body?.data) ? body : null;
+    }, 3);
+
+    for (const item of detailJson.data || []) {
+      if (item?.id) detailById.set(Number(item.id), item);
+    }
+  }
+
+  const list = chartSongs
+    .map(song => mapQQTrackToSong(detailById.get(Number(song.songId)) || {}, song))
+    .filter(song => song.songmid && song.strMediaMid);
+  const total = Number(chart.totalNum || list.length || 0);
+
+  return createSearchResponse({
+    list,
+    total,
+    page,
+    limit,
+    allPage: Math.ceil(total / limit),
+    source: "tx",
+    chart: "hot",
+    title: `QQ音乐${chart.title || "热歌榜"}`,
+    titleDetail: chart.titleShare || chart.titleDetail || chart.title || "热歌榜",
+    updateTime: chart.updateTime || chart.period || "",
+    period: chart.period || ""
+  }, responseHeaders);
+}
+
 export async function onRequestGet(context) {
   const { searchParams } = new URL(context.request.url);
   const keyword = searchParams.get("keyword") || "";
   const source = searchParams.get("source") || "wy";
+  const chart = searchParams.get("chart") || "";
   const page = parseInt(searchParams.get("page") || "1", 10);
   const limit = parseInt(searchParams.get("limit") || "30", 10);
   const responseHeaders = {
@@ -254,6 +380,9 @@ export async function onRequestGet(context) {
     "CDN-Cache-Control": "no-store",
     "Pragma": "no-cache"
   };
+  if (source === "tx" && chart === "hot") {
+    return fetchQQHotChart(page, limit, responseHeaders);
+  }
   if (!keyword) {
     return new Response(JSON.stringify({ list: [], total: 0, page, limit }), {
       status: 200,
