@@ -3183,6 +3183,7 @@ async function togglePlay(song, itemEl) {
     const { downloadUrl, resolution, finalFilename } = await createDownloadLinkWithFallback(song, '128k', displayFilename, dummyStatusText, {
       validate: false,
       includeCover: false,
+      eagerAlternatives: true,
       loadTimeoutMs: 8000,
       resolveTimeoutMs: 8000,
     });
