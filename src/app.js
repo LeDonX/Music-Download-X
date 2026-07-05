@@ -29,6 +29,11 @@ const LYRIC_NATIVE_TIMEOUT_MS = 4200;
 const LYRIC_API_TIMEOUT_MS = 8500;
 const LYRIC_TOTAL_TIMEOUT_MS = 9500;
 const LYRIC_CACHE_LIMIT = 80;
+const PLAY_FALLBACK_SEARCH_TIMEOUT_MS = 6000;
+const PLAYBACK_METADATA_TIMEOUT_MS = 5000;
+const PLAYBACK_INVALID_SHORT_AUDIO_SECONDS = 10;
+const PLAYBACK_SHORT_MIN_EXPECTED_SECONDS = 30;
+const PLAY_RACE_CANDIDATES_PER_SOURCE = 1;
 const SUSPICIOUS_SHORT_AUDIO_SECONDS = 15;
 const SUSPICIOUS_SHORT_MIN_EXPECTED_SECONDS = 30;
 const SUSPICIOUS_DURATION_RATIO = 0.35;
@@ -705,7 +710,7 @@ function getFiniteAudioDuration(audioEl) {
   return Number.isFinite(duration) && duration > 0 ? duration : 0;
 }
 
-function probeAudioMetadata(playbackUrl) {
+function probeAudioMetadata(playbackUrl, timeoutMs = RESOLUTION_METADATA_TIMEOUT_MS) {
   if (typeof Audio !== 'function') {
     return Promise.resolve({ duration: 0, inconclusive: true });
   }
@@ -770,7 +775,7 @@ function probeAudioMetadata(playbackUrl) {
       } else {
         finish(new Error('音频元数据加载超时'), true);
       }
-    }, RESOLUTION_METADATA_TIMEOUT_MS);
+    }, timeoutMs);
 
     probe.preload = 'metadata';
     probe.addEventListener('loadedmetadata', onMetadata);
@@ -827,6 +832,23 @@ async function validateResolvedDownload(downloadUrl, song, statusText, resolutio
   }, expectedSeconds);
 
   if (issue) throw new Error(issue);
+}
+
+async function validatePlaybackResolvedDownload(downloadUrl, song) {
+  const expectedSeconds = intervalToSeconds(song.interval);
+  if (expectedSeconds > 0 && expectedSeconds < PLAYBACK_SHORT_MIN_EXPECTED_SECONDS) return;
+
+  const playbackUrl = getPlaybackDownloadUrl(downloadUrl);
+  const metadata = await probeAudioMetadata(playbackUrl, PLAYBACK_METADATA_TIMEOUT_MS);
+  const duration = Number(metadata.duration || 0);
+
+  if (
+    expectedSeconds >= PLAYBACK_SHORT_MIN_EXPECTED_SECONDS &&
+    duration > 0 &&
+    duration <= PLAYBACK_INVALID_SHORT_AUDIO_SECONDS
+  ) {
+    throw new Error(`解析结果只有 ${formatTime(duration)}，疑似试听片段`);
+  }
 }
 
 function triggerBrowserDownload(url, filename) {
@@ -1142,9 +1164,9 @@ function rankAlternativeSong(target, candidate, quality) {
   return score >= 60 ? score : -1;
 }
 
-async function fetchSourceSearch(keyword, source, limit = 25) {
+async function fetchSourceSearch(keyword, source, limit = 25, timeoutMs = 15000) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const url = `/api/search?keyword=${encodeURIComponent(keyword)}&source=${source}&page=1&limit=${limit}`;
     const res = await fetch(url, { signal: controller.signal });
@@ -1485,6 +1507,136 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
 
     if (!triedAlternative) {
       console.warn('[Download] no fallback platform candidates found');
+    }
+  }
+
+  throw lastError || new Error('所有平台和解析服务均解析失败');
+}
+
+function firstSuccessfulPromise(promises, message) {
+  if (!promises.length) return Promise.reject(new Error(message));
+
+  return new Promise((resolve, reject) => {
+    const errors = [];
+    let pending = promises.length;
+    let settled = false;
+
+    promises.forEach((promise, index) => {
+      Promise.resolve(promise).then((value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      }).catch((err) => {
+        if (settled) return;
+        errors[index] = err;
+        pending -= 1;
+        if (pending === 0) {
+          const error = new Error(message);
+          error.cause = errors.find(Boolean);
+          error.errors = errors.filter(Boolean);
+          reject(error);
+        }
+      });
+    });
+  });
+}
+
+function createPlaybackCandidateProvider(song, quality) {
+  const keyword = `${song.name || ''} ${song.singer || ''}`.trim();
+  const seen = new Set();
+  const entries = keyword
+    ? PLATFORM_IDS
+      .filter(source => source !== song.source)
+      .map(source => ({
+        source,
+        promise: fetchSourceSearch(keyword, source, 25, PLAY_FALLBACK_SEARCH_TIMEOUT_MS)
+          .then(data => rankAlternativeSearchResults(song, quality, data, seen).slice(0, PLAY_RACE_CANDIDATES_PER_SOURCE))
+          .catch((err) => {
+            console.warn(`[Play] fallback search failed for ${source}:`, err.message || err);
+            return [];
+          }),
+      }))
+    : [];
+
+  return {
+    createTasks(resolveCandidate) {
+      const tasks = [
+        resolveCandidate(song, { original: true }),
+      ];
+
+      for (const entry of entries) {
+        tasks.push(entry.promise.then(async (candidates) => {
+          if (!candidates.length) {
+            throw new Error(`${getPlatformName(entry.source)}未找到匹配歌曲`);
+          }
+
+          let lastError = null;
+          for (const candidate of candidates) {
+            try {
+              return await resolveCandidate(candidate, { original: false });
+            } catch (err) {
+              lastError = err;
+              console.warn(`[Play] ${getPlatformName(entry.source)} candidate failed:`, err.message || err);
+            }
+          }
+          throw lastError || new Error(`${getPlatformName(entry.source)}候选歌曲解析失败`);
+        }));
+      }
+
+      return tasks;
+    },
+  };
+}
+
+async function racePlaybackWithResolver(url, sandboxInstance, candidateProvider, quality, filename, statusText, options = {}) {
+  const sourceName = getResolverName(url);
+  const raceState = { settled: false };
+  const raceStatusText = {
+    set innerText(value) {
+      if (!raceState.settled) statusText.innerText = value;
+    },
+  };
+
+  const resolveCandidate = (candidate) => resolveWithLoadedResolver(url, sandboxInstance, candidate, quality, raceStatusText, async (resolution) => {
+    const result = await buildDownloadUrlFromResolution(resolution, quality, filename, candidate, raceStatusText, options);
+    await validatePlaybackResolvedDownload(result.downloadUrl, resolution.resolvedSong || candidate);
+    return result;
+  }, { resolveTimeoutMs: options.resolveTimeoutMs });
+
+  try {
+    return await firstSuccessfulPromise(
+      candidateProvider.createTasks(resolveCandidate),
+      `[${sourceName}] 所有平台均解析失败`
+    );
+  } finally {
+    raceState.settled = true;
+  }
+}
+
+async function createPlaybackLinkWithFallback(song, quality, filename, statusText, options = {}) {
+  const {
+    loadTimeoutMs = RESOLVE_TIMEOUT_MS,
+  } = options;
+  const candidateProvider = createPlaybackCandidateProvider(song, quality);
+  let lastError = null;
+
+  for (const url of getResolverUrlsToTry()) {
+    const sourceName = getResolverName(url);
+    let sandboxInstance = null;
+    try {
+      sandboxInstance = await loadResolverForDownload(url, loadTimeoutMs);
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Play] Resolver ${url} load failed:`, err.message || err);
+      continue;
+    }
+
+    try {
+      statusText.innerText = `[${sourceName}] 正在并发解析多个平台...`;
+      return await racePlaybackWithResolver(url, sandboxInstance, candidateProvider, quality, filename, statusText, options);
+    } catch (err) {
+      lastError = err?.cause || err;
+      console.warn(`[Play] ${sourceName} all platform candidates failed:`, err.message || err);
     }
   }
 
@@ -3008,6 +3160,20 @@ audio.addEventListener('timeupdate', () => {
 });
 
 audio.addEventListener('loadedmetadata', () => {
+  const loadedDuration = getFiniteSeconds(audio.duration);
+  const expectedDuration = intervalToSeconds(activePlaybackContext?.song?.interval);
+  if (
+    activeSongId &&
+    expectedDuration >= PLAYBACK_SHORT_MIN_EXPECTED_SECONDS &&
+    loadedDuration > 0 &&
+    loadedDuration <= PLAYBACK_INVALID_SHORT_AUDIO_SECONDS
+  ) {
+    showToast(`解析结果只有 ${formatTime(loadedDuration)}，疑似试听片段`, 'error');
+    closeInlinePlayerOverlay();
+    resetActiveSongUI();
+    return;
+  }
+
   if (activeSongId && activeTotalTimeText) {
     activeTotalTimeText.innerText = formatTime(audio.duration);
   }
@@ -3275,10 +3441,9 @@ async function togglePlay(song, itemEl) {
 
   try {
     const displayFilename = buildSongFilename(song, 'mp3');
-    const { downloadUrl, resolution, finalFilename } = await createDownloadLinkWithFallback(song, '128k', displayFilename, dummyStatusText, {
+    const { downloadUrl, resolution, finalFilename } = await createPlaybackLinkWithFallback(song, '128k', displayFilename, dummyStatusText, {
       validate: false,
       includeCover: false,
-      eagerAlternatives: true,
       loadTimeoutMs: 8000,
       resolveTimeoutMs: 8000,
     });
