@@ -13,6 +13,11 @@ function setText(id, text) {
 }
 
 function startDownload(url, filename) {
+  if (isIOSBrowser()) {
+    window.location.href = url;
+    return;
+  }
+
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
@@ -41,11 +46,6 @@ function init() {
   startBtn?.addEventListener('click', () => {
     if (!url || !/^https?:\/\//i.test(url)) return;
     startDownload(url, filename);
-    if (isIOSBrowser()) {
-      setTimeout(() => {
-        window.location.href = url;
-      }, 80);
-    }
     startBtn.textContent = '已交给浏览器';
     setText('downloadHint', '下载已交给浏览器处理。如果没有看到进度，请打开浏览器下载列表，或回到桌面查看系统下载状态。');
   });

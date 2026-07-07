@@ -540,7 +540,7 @@ function getExt(filename, metaExt, contentType) {
   return '';
 }
 
-async function handleDownload(url, filename, headers, meta = {}, requestUrl = '', requestHeaders = new Headers()) {
+async function handleDownload(url, filename, headers, meta = {}, requestUrl = '', requestHeaders = new Headers(), method = 'GET') {
   if (!url) {
     return new Response('Missing URL parameter', {
       status: 400,
@@ -559,15 +559,18 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
   }
 
   try {
+    const isHead = method === 'HEAD';
     const isPlayback = meta.play === '1';
+    const isRaw = meta.raw === '1';
     const requestRange = requestHeaders.get('range') || '';
-    const coverPromise = isPlayback ? Promise.resolve(null) : fetchCoverBytes(meta.cover || '', requestUrl);
+    const upstreamRange = requestRange || (isPlayback ? 'bytes=0-' : (isRaw ? '' : 'bytes=0-'));
+    const coverPromise = (isHead || isPlayback || isRaw) ? Promise.resolve(null) : fetchCoverBytes(meta.cover || '', requestUrl);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(new Error('media fetch timeout')), MEDIA_FETCH_TIMEOUT_MS);
     let res;
     try {
       res = await fetch(targetUrl.toString(), {
-        headers: getDownloadHeaders(targetUrl.toString(), headers, isPlayback ? (requestRange || 'bytes=0-') : 'bytes=0-'),
+        headers: getDownloadHeaders(targetUrl.toString(), headers, upstreamRange),
         redirect: 'follow',
         signal: controller.signal,
       });
@@ -598,8 +601,8 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
     let body = res.body;
     let transformed = false;
     let coverEmbedded = false;
-    const canTransform = !isPlayback;
-    const responseStatus = isPlayback && res.status === 206 ? 206 : 200;
+    const canTransform = !isHead && !isPlayback && !isRaw && !requestRange;
+    const responseStatus = requestRange && res.status === 206 ? 206 : 200;
 
     if (body && canTransform && ext === 'mp3') {
       const cover = await coverPromise;
@@ -643,7 +646,7 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
 
     const fixedLengthBody = transformed ? createFixedLengthBody(body, expectedLength) : null;
 
-    return new Response(fixedLengthBody || body, {
+    return new Response(method === 'HEAD' ? null : (fixedLengthBody || body), {
       status: responseStatus,
       headers: responseHeaders,
     });
@@ -676,8 +679,11 @@ export async function onRequestGet(context) {
     cover: searchParams.get('cover') || '',
     ext: searchParams.get('ext') || '',
     play: searchParams.get('play') || '',
-  }, context.request.url, context.request.headers);
+    raw: searchParams.get('raw') || '',
+  }, context.request.url, context.request.headers, context.request.method);
 }
+
+export const onRequestHead = onRequestGet;
 
 export async function onRequestPost(context) {
   try {

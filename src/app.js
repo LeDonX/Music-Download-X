@@ -371,6 +371,11 @@ function isIOSBrowser() {
   return /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
 
+function isMobileBrowser() {
+  const ua = navigator.userAgent || '';
+  return isIOSBrowser() || /Android|Mobile|Windows Phone/i.test(ua);
+}
+
 function toAbsoluteUrl(url) {
   return new URL(url, window.location.href).toString();
 }
@@ -1451,7 +1456,7 @@ async function resolveWithScripts(song, quality, statusText, validateResolution,
   throw new Error('解析服务未返回有效链接');
 }
 
-function buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt, coverUrl = '') {
+function buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt, coverUrl = '', options = {}) {
   const params = new URLSearchParams({
     url: resolution.audioUrl,
     filename: finalFilename,
@@ -1462,18 +1467,19 @@ function buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt
     cover: coverUrl || '',
     ext: finalExt,
   });
+  if (options.raw) params.set('raw', '1');
   return `/api/download?${params.toString()}`;
 }
 
 async function buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText, options = {}) {
-  const { validate = true, includeCover = true, useExistingCover = true } = options;
+  const { validate = true, includeCover = true, useExistingCover = true, raw = false } = options;
   const sourceName = getResolverName(resolution.successfulUrl);
 
   const mediaInfo = getDownloadMediaInfo('', quality, resolution.resolvedQuality, resolution.audioUrl);
   const finalExt = mediaInfo.actualExt || getDefaultExtensionForQuality(mediaInfo.actualQuality || quality);
   const finalFilename = buildSongFilename(song, finalExt);
   const metadataSong = resolution.resolvedSong || song;
-  const preliminaryDownloadUrl = buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt);
+  const preliminaryDownloadUrl = buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt, '', { raw });
   if (validate === 'headers') {
     await validateResolvedDownloadHeaders(preliminaryDownloadUrl, metadataSong, statusText, resolution);
   } else if (validate) {
@@ -1482,7 +1488,7 @@ async function buildDownloadUrlFromResolution(resolution, quality, filename, son
 
   statusText.innerText = `[${sourceName}] 正在准备带封面和歌手信息的下载...`;
   const coverUrl = includeCover ? await getBestCoverUrl(metadataSong) : (useExistingCover ? (metadataSong.img || '') : '');
-  const downloadUrl = buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt, coverUrl);
+  const downloadUrl = buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt, coverUrl, { raw });
 
   return {
     downloadUrl,
@@ -2742,6 +2748,7 @@ async function startDownloadTask(song, quality) {
     const actionEl = document.getElementById(`task-action-${taskId}`);
 
     const useDownloadPage = isIOSBrowser() && !isWeChatBrowser();
+    const useRawDownload = isMobileBrowser();
     statusText.innerText = useDownloadPage ? '正在准备 iPhone 下载页...' : '正在解析链接...';
     updateDownloadProgressOnCard(song.songmid, song.source, 5);
 
@@ -2749,6 +2756,7 @@ async function startDownloadTask(song, quality) {
       validate: 'headers',
       includeCover: false,
       useExistingCover: false,
+      raw: useRawDownload,
       loadTimeoutMs: DOWNLOAD_RESOLVE_TIMEOUT_MS,
       resolveTimeoutMs: DOWNLOAD_RESOLVE_TIMEOUT_MS,
       fallbackBatchLimit: DOWNLOAD_FALLBACK_BATCH_LIMIT,
