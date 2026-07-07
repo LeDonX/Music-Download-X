@@ -26,9 +26,11 @@ const RESOLVE_TIMEOUT_MS = 22000;
 const DOWNLOAD_RESOLVE_TIMEOUT_MS = 9000;
 const MOBILE_DOWNLOAD_RESOLVE_TIMEOUT_MS = 6500;
 const DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS = 6000;
+const MOBILE_DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS = 3500;
 const DOWNLOAD_MAX_RESOLVERS = 3;
 const MOBILE_DOWNLOAD_MAX_RESOLVERS = 1;
 const DOWNLOAD_FALLBACK_BATCH_LIMIT = 2;
+const MOBILE_DOWNLOAD_RACE_CANDIDATES_PER_SOURCE = 1;
 const RESOLUTION_HEADER_TIMEOUT_MS = 7000;
 const RESOLUTION_METADATA_TIMEOUT_MS = 12000;
 const LYRIC_NATIVE_TIMEOUT_MS = 4200;
@@ -1577,6 +1579,95 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
   throw lastError || new Error('所有平台和解析服务均解析失败');
 }
 
+function createMobileDownloadCandidateProvider(song, quality) {
+  const keyword = `${song.name || ''} ${song.singer || ''}`.trim();
+  const seen = new Set();
+  const entries = keyword
+    ? PLATFORM_IDS
+      .filter(source => source !== song.source)
+      .map(source => ({
+        source,
+        promise: fetchSourceSearch(keyword, source, 12, MOBILE_DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS)
+          .then(data => rankAlternativeSearchResults(song, quality, data, seen).slice(0, MOBILE_DOWNLOAD_RACE_CANDIDATES_PER_SOURCE))
+          .catch((err) => {
+            console.warn(`[Download] mobile fallback search failed for ${source}:`, err.message || err);
+            return [];
+          }),
+      }))
+    : [];
+
+  return {
+    createTasks(resolveCandidate) {
+      const tasks = [
+        resolveCandidate(song, { original: true }),
+      ];
+
+      for (const entry of entries) {
+        tasks.push(entry.promise.then(async (candidates) => {
+          if (!candidates.length) {
+            throw new Error(`${getPlatformName(entry.source)}未找到匹配歌曲`);
+          }
+
+          let lastError = null;
+          for (const candidate of candidates) {
+            try {
+              return await resolveCandidate(candidate, { original: false });
+            } catch (err) {
+              lastError = err;
+              console.warn(`[Download] mobile ${getPlatformName(entry.source)} candidate failed:`, err.message || err);
+            }
+          }
+          throw lastError || new Error(`${getPlatformName(entry.source)}候选歌曲解析失败`);
+        }));
+      }
+
+      return tasks;
+    },
+  };
+}
+
+async function createMobileDownloadLink(song, quality, filename, statusText, options = {}) {
+  const candidateProvider = createMobileDownloadCandidateProvider(song, quality);
+  let lastError = null;
+
+  for (const url of getDownloadResolverUrlsToTry(MOBILE_DOWNLOAD_MAX_RESOLVERS)) {
+    const sourceName = getResolverName(url);
+    let sandboxInstance = null;
+    try {
+      sandboxInstance = await loadResolverForDownload(url, MOBILE_DOWNLOAD_RESOLVE_TIMEOUT_MS);
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Download] mobile resolver ${url} load failed:`, err.message || err);
+      continue;
+    }
+
+    const raceState = { settled: false };
+    const raceStatusText = {
+      set innerText(value) {
+        if (!raceState.settled) statusText.innerText = value;
+      },
+    };
+    const resolveCandidate = (candidate) => resolveWithLoadedResolver(url, sandboxInstance, candidate, quality, raceStatusText, (resolution) => {
+      return buildDownloadUrlFromResolution(resolution, quality, filename, candidate, raceStatusText, options);
+    }, { resolveTimeoutMs: MOBILE_DOWNLOAD_RESOLVE_TIMEOUT_MS });
+
+    try {
+      statusText.innerText = `[${sourceName}] 正在快速匹配可下载版本...`;
+      return await firstSuccessfulPromise(
+        candidateProvider.createTasks(resolveCandidate),
+        `[${sourceName}] 暂未解析到可下载链接`
+      );
+    } catch (err) {
+      lastError = err?.cause || err;
+      console.warn(`[Download] mobile ${sourceName} candidates failed:`, err.message || err);
+    } finally {
+      raceState.settled = true;
+    }
+  }
+
+  throw lastError || new Error('暂未解析到可下载链接');
+}
+
 function firstSuccessfulPromise(promises, message) {
   if (!promises.length) return Promise.reject(new Error(message));
 
@@ -2758,18 +2849,22 @@ async function startDownloadTask(song, quality) {
     statusText.innerText = useDownloadPage ? '正在准备 iPhone 下载页...' : '正在解析链接...';
     updateDownloadProgressOnCard(song.songmid, song.source, 5);
 
-    const { downloadUrl, resolution, mediaInfo, finalFilename } = await createDownloadLinkWithFallback(song, quality, displayFilename, statusText, {
+    const downloadOptions = {
       validate: mobileDownload ? false : 'headers',
       includeCover: false,
       useExistingCover: false,
       raw: useRawDownload,
-      loadTimeoutMs: mobileDownload ? MOBILE_DOWNLOAD_RESOLVE_TIMEOUT_MS : DOWNLOAD_RESOLVE_TIMEOUT_MS,
-      resolveTimeoutMs: mobileDownload ? MOBILE_DOWNLOAD_RESOLVE_TIMEOUT_MS : DOWNLOAD_RESOLVE_TIMEOUT_MS,
-      fallbackBatchLimit: mobileDownload ? 0 : DOWNLOAD_FALLBACK_BATCH_LIMIT,
-      fallbackSearchTimeoutMs: mobileDownload ? 0 : DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS,
-      resolverUrls: getDownloadResolverUrlsToTry(mobileDownload ? MOBILE_DOWNLOAD_MAX_RESOLVERS : DOWNLOAD_MAX_RESOLVERS),
-      allowFallback: !mobileDownload,
-    });
+    };
+    const { downloadUrl, resolution, mediaInfo, finalFilename } = mobileDownload
+      ? await createMobileDownloadLink(song, quality, displayFilename, statusText, downloadOptions)
+      : await createDownloadLinkWithFallback(song, quality, displayFilename, statusText, {
+        ...downloadOptions,
+        loadTimeoutMs: DOWNLOAD_RESOLVE_TIMEOUT_MS,
+        resolveTimeoutMs: DOWNLOAD_RESOLVE_TIMEOUT_MS,
+        fallbackBatchLimit: DOWNLOAD_FALLBACK_BATCH_LIMIT,
+        fallbackSearchTimeoutMs: DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS,
+        resolverUrls: getDownloadResolverUrlsToTry(DOWNLOAD_MAX_RESOLVERS),
+      });
     const resolvedSong = resolution.resolvedSong;
     const usedFallback = resolvedSong.source !== song.source || resolvedSong.songmid !== song.songmid;
     const actualQuality = mediaInfo.actualQuality;
