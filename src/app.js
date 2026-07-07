@@ -1087,7 +1087,6 @@ function createDownloadTaskFromResolvedUrl(song, downloadUrl, filename, options 
   const taskId = Date.now().toString();
   createDownloadTaskElement(taskId, finalFilename);
   const { statusText, sizeText, progressFill, pctText, actionEl } = getDownloadTaskUi(taskId);
-  const useDownloadPage = isIOSBrowser() && !isWeChatBrowser();
   const resolvedUrl = new URL(downloadUrl, window.location.href);
   if (isMobileBrowser()) resolvedUrl.searchParams.set('raw', '1');
   const absoluteDownloadUrl = resolvedUrl.toString();
@@ -1106,26 +1105,22 @@ function createDownloadTaskFromResolvedUrl(song, downloadUrl, filename, options 
     return true;
   }
 
-  if (useDownloadPage) {
-    statusText.innerText = '下载页已准备好';
-    statusText.className = 'queue-status completed';
-    sizeText.innerText = '正在打开下载页';
-    progressFill.style.width = '100%';
-    pctText.innerText = '已准备';
-    updateDownloadProgressOnCard(song?.songmid, song?.source, 100, false, true);
-    showDownloadPageAction({ actionEl, downloadUrl: absoluteDownloadUrl, filename: finalFilename, statusText, taskId });
-    window.location.href = buildDownloadPageUrl(absoluteDownloadUrl, finalFilename);
-    return true;
-  }
-
-  triggerBrowserDownload(absoluteDownloadUrl, finalFilename);
-  statusText.innerText = options.statusText || '已创建浏览器下载任务';
-  statusText.className = 'queue-status completed';
-  sizeText.innerText = '请在浏览器下载栏查看进度';
-  progressFill.style.width = '100%';
-  pctText.innerText = '已创建';
-  updateDownloadProgressOnCard(song?.songmid, song?.source, 100, false, true);
-  showToast(`已创建下载任务: ${song?.name || finalFilename}`, 'success');
+  downloadInsidePage(absoluteDownloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song)
+    .then(() => {
+      showToast(`文件已生成: ${song?.name || finalFilename}`, 'success');
+    })
+    .catch((err) => {
+      console.warn('[Download] resolved in-page download interrupted:', err);
+      const reason = getReadableError(err);
+      statusText.innerText = `网页内下载中断: ${reason}`;
+      statusText.className = 'queue-status warning';
+      sizeText.innerText = '可改用浏览器下载同一文件';
+      progressFill.style.width = '100%';
+      pctText.innerText = '待处理';
+      updateDownloadProgressOnCard(song?.songmid, song?.source, 100, false, true);
+      showBrowserDownloadAction({ actionEl, downloadUrl: absoluteDownloadUrl, filename: finalFilename, statusText, taskId });
+      showToast('网页内下载中断，请点击“用浏览器下载”继续', 'warning');
+    });
   return true;
 }
 
@@ -2935,10 +2930,9 @@ async function startDownloadTask(song, quality) {
   try {
     const { statusText, sizeText, progressFill, pctText, actionEl } = getDownloadTaskUi(taskId);
 
-    const useDownloadPage = isIOSBrowser() && !isWeChatBrowser();
     const useRawDownload = isMobileBrowser();
     const mobileDownload = isMobileBrowser();
-    statusText.innerText = useDownloadPage ? '正在准备 iPhone 下载页...' : '正在解析链接...';
+    statusText.innerText = '正在解析链接...';
     updateDownloadProgressOnCard(song.songmid, song.source, 5);
 
     const downloadOptions = {
@@ -2986,35 +2980,27 @@ async function startDownloadTask(song, quality) {
       return;
     }
 
-    if (useDownloadPage) {
-      statusText.innerText = '下载页已准备好' + qualityWarnText;
-      statusText.className = 'queue-status completed';
-      sizeText.innerText = '正在打开下载页';
+    try {
+      await downloadInsidePage(downloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song);
+      releaseDownloadTask(taskId);
+      if (isQualityChanged) {
+        showToast(`文件已生成: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
+      } else if (usedFallback) {
+        showToast(`文件已生成: ${song.name} (已自动切换到${getPlatformName(resolvedSong.source)})`, 'success');
+      } else {
+        showToast(`文件已生成: ${song.name}`, 'success');
+      }
+    } catch (err) {
+      console.warn('[Download] in-page download interrupted:', err);
+      const reason = getReadableError(err);
+      statusText.innerText = `网页内下载中断: ${reason}`;
+      statusText.className = 'queue-status warning';
+      sizeText.innerText = '可改用浏览器下载同一文件';
       progressFill.style.width = '100%';
-      pctText.innerText = '已准备';
+      pctText.innerText = '待处理';
       updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
-      showDownloadPageAction({ actionEl, downloadUrl, filename: finalFilename, statusText, taskId });
-      showToast('iPhone 请点击“打开下载页”开始下载', 'success');
-      window.location.href = buildDownloadPageUrl(downloadUrl, finalFilename);
-      return;
-    }
-
-    triggerBrowserDownload(downloadUrl, finalFilename);
-
-    statusText.innerText = '已创建浏览器下载任务' + qualityWarnText;
-    statusText.className = 'queue-status completed';
-    sizeText.innerText = '请在浏览器下载栏查看进度';
-    progressFill.style.width = '100%';
-    pctText.innerText = '已创建';
-    updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
-    releaseDownloadTask(taskId);
-    
-    if (isQualityChanged) {
-      showToast(`已创建下载任务: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
-    } else if (usedFallback) {
-      showToast(`已创建下载任务: ${song.name} (已自动切换到${getPlatformName(resolvedSong.source)})`, 'success');
-    } else {
-      showToast(`已创建下载任务: ${song.name}`, 'success');
+      showBrowserDownloadAction({ actionEl, downloadUrl, filename: finalFilename, statusText, taskId });
+      showToast('网页内下载中断，请点击“用浏览器下载”继续', 'warning');
     }
 
   } catch (err) {
