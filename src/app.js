@@ -24,8 +24,10 @@ const SEARCH_EMPTY_RETRY_LIMIT = 3;
 const SEARCH_RETRY_DELAYS = [250, 700, 1400];
 const RESOLVE_TIMEOUT_MS = 22000;
 const DOWNLOAD_RESOLVE_TIMEOUT_MS = 9000;
+const MOBILE_DOWNLOAD_RESOLVE_TIMEOUT_MS = 6500;
 const DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS = 6000;
 const DOWNLOAD_MAX_RESOLVERS = 3;
+const MOBILE_DOWNLOAD_MAX_RESOLVERS = 1;
 const DOWNLOAD_FALLBACK_BATCH_LIMIT = 2;
 const RESOLUTION_HEADER_TIMEOUT_MS = 7000;
 const RESOLUTION_METADATA_TIMEOUT_MS = 12000;
@@ -1513,6 +1515,7 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
     fallbackBatchLimit = Infinity,
     fallbackSearchTimeoutMs = 15000,
     resolverUrls = getResolverUrlsToTry(),
+    allowFallback = true,
   } = options;
   let alternativeCollector = eagerAlternatives
     ? createAlternativeSongCollector(song, quality, { searchTimeoutMs: fallbackSearchTimeoutMs })
@@ -1545,6 +1548,8 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
       lastError = err;
       console.warn(`[Download] ${sourceName} original ${song.source} failed:`, err.message);
     }
+
+    if (!allowFallback) continue;
 
     let triedAlternative = false;
     while (true) {
@@ -2749,19 +2754,21 @@ async function startDownloadTask(song, quality) {
 
     const useDownloadPage = isIOSBrowser() && !isWeChatBrowser();
     const useRawDownload = isMobileBrowser();
+    const mobileDownload = isMobileBrowser();
     statusText.innerText = useDownloadPage ? '正在准备 iPhone 下载页...' : '正在解析链接...';
     updateDownloadProgressOnCard(song.songmid, song.source, 5);
 
     const { downloadUrl, resolution, mediaInfo, finalFilename } = await createDownloadLinkWithFallback(song, quality, displayFilename, statusText, {
-      validate: 'headers',
+      validate: mobileDownload ? false : 'headers',
       includeCover: false,
       useExistingCover: false,
       raw: useRawDownload,
-      loadTimeoutMs: DOWNLOAD_RESOLVE_TIMEOUT_MS,
-      resolveTimeoutMs: DOWNLOAD_RESOLVE_TIMEOUT_MS,
-      fallbackBatchLimit: DOWNLOAD_FALLBACK_BATCH_LIMIT,
-      fallbackSearchTimeoutMs: DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS,
-      resolverUrls: getDownloadResolverUrlsToTry(),
+      loadTimeoutMs: mobileDownload ? MOBILE_DOWNLOAD_RESOLVE_TIMEOUT_MS : DOWNLOAD_RESOLVE_TIMEOUT_MS,
+      resolveTimeoutMs: mobileDownload ? MOBILE_DOWNLOAD_RESOLVE_TIMEOUT_MS : DOWNLOAD_RESOLVE_TIMEOUT_MS,
+      fallbackBatchLimit: mobileDownload ? 0 : DOWNLOAD_FALLBACK_BATCH_LIMIT,
+      fallbackSearchTimeoutMs: mobileDownload ? 0 : DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS,
+      resolverUrls: getDownloadResolverUrlsToTry(mobileDownload ? MOBILE_DOWNLOAD_MAX_RESOLVERS : DOWNLOAD_MAX_RESOLVERS),
+      allowFallback: !mobileDownload,
     });
     const resolvedSong = resolution.resolvedSong;
     const usedFallback = resolvedSong.source !== song.source || resolvedSong.songmid !== song.songmid;
