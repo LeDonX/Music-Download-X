@@ -1035,6 +1035,98 @@ function showDownloadPageAction({ actionEl, downloadUrl, filename, statusText, t
   });
 }
 
+function canUseResolvedDownloadUrl(downloadUrl) {
+  try {
+    return Boolean(downloadUrl && /^https?:\/\//i.test(toAbsoluteUrl(downloadUrl)));
+  } catch (_) {
+    return false;
+  }
+}
+
+function createDownloadTaskElement(taskId, displayFilename) {
+  const taskEl = document.createElement('div');
+  taskEl.className = 'queue-item';
+  taskEl.id = `task-${taskId}`;
+  taskEl.innerHTML = `
+    <div class="queue-info">
+      <div class="queue-name" title="${escapeHtml(displayFilename)}">${escapeHtml(displayFilename)}</div>
+      <div class="queue-size" id="task-size-${taskId}">解析中...</div>
+    </div>
+    <div class="queue-progress-bar-bg">
+      <div class="queue-progress-bar-fill" id="task-progress-${taskId}"></div>
+    </div>
+    <div class="queue-footer">
+      <div class="queue-status" id="task-status-${taskId}">等待获取链接</div>
+      <div class="queue-percentage" id="task-pct-${taskId}">0%</div>
+    </div>
+    <div class="queue-action" id="task-action-${taskId}"></div>
+  `;
+
+  const firstChild = el.queueList.firstChild;
+  if (firstChild && el.queueList.querySelector('.empty-state')) {
+    el.queueList.innerHTML = '';
+  }
+  el.queueList.insertBefore(taskEl, el.queueList.firstChild);
+  return taskEl;
+}
+
+function getDownloadTaskUi(taskId) {
+  return {
+    statusText: document.getElementById(`task-status-${taskId}`),
+    sizeText: document.getElementById(`task-size-${taskId}`),
+    progressFill: document.getElementById(`task-progress-${taskId}`),
+    pctText: document.getElementById(`task-pct-${taskId}`),
+    actionEl: document.getElementById(`task-action-${taskId}`),
+  };
+}
+
+function createDownloadTaskFromResolvedUrl(song, downloadUrl, filename, options = {}) {
+  if (!canUseResolvedDownloadUrl(downloadUrl)) return false;
+
+  const finalFilename = filename || buildSongFilename(song, getDefaultExtensionForQuality('128k'));
+  const taskId = Date.now().toString();
+  createDownloadTaskElement(taskId, finalFilename);
+  const { statusText, sizeText, progressFill, pctText, actionEl } = getDownloadTaskUi(taskId);
+  const useDownloadPage = isIOSBrowser() && !isWeChatBrowser();
+  const absoluteDownloadUrl = toAbsoluteUrl(downloadUrl);
+
+  showToast(`开始下载任务: ${song?.name || finalFilename}`, 'info');
+  updateDownloadProgressOnCard(song?.songmid, song?.source, 10);
+
+  if (isWeChatBrowser()) {
+    showWeChatDownloadModal(absoluteDownloadUrl, finalFilename);
+    statusText.innerText = '微信内无法直接下载';
+    statusText.className = 'queue-status warning';
+    sizeText.innerText = '请复制链接或在浏览器打开';
+    progressFill.style.width = '100%';
+    pctText.innerText = '待处理';
+    updateDownloadProgressOnCard(song?.songmid, song?.source, 100, false, true);
+    return true;
+  }
+
+  if (useDownloadPage) {
+    statusText.innerText = '下载页已准备好';
+    statusText.className = 'queue-status completed';
+    sizeText.innerText = '正在打开下载页';
+    progressFill.style.width = '100%';
+    pctText.innerText = '已准备';
+    updateDownloadProgressOnCard(song?.songmid, song?.source, 100, false, true);
+    showDownloadPageAction({ actionEl, downloadUrl: absoluteDownloadUrl, filename: finalFilename, statusText, taskId });
+    window.location.href = buildDownloadPageUrl(absoluteDownloadUrl, finalFilename);
+    return true;
+  }
+
+  triggerBrowserDownload(absoluteDownloadUrl, finalFilename);
+  statusText.innerText = options.statusText || '已创建浏览器下载任务';
+  statusText.className = 'queue-status completed';
+  sizeText.innerText = '请在浏览器下载栏查看进度';
+  progressFill.style.width = '100%';
+  pctText.innerText = '已创建';
+  updateDownloadProgressOnCard(song?.songmid, song?.source, 100, false, true);
+  showToast(`已创建下载任务: ${song?.name || finalFilename}`, 'success');
+  return true;
+}
+
 async function downloadInsidePage(downloadUrl, filename, ui, song) {
   const { statusText, sizeText, progressFill, pctText, actionEl } = ui;
   statusText.innerText = '正在网页内生成带封面文件...';
@@ -2563,7 +2655,6 @@ function appendSearchResults(songs) {
 
     item.querySelector('.download-progress-wrapper').addEventListener('click', (e) => {
       e.stopPropagation();
-      if (e.currentTarget.classList.contains('downloading')) return;
       openDownloadModal(song);
     });
 
@@ -2807,41 +2898,13 @@ async function startDownloadTask(song, quality) {
   const taskId = Date.now().toString();
   lockDownloadTask(taskId, song);
 
-  // Create UI list item
-  const taskEl = document.createElement('div');
-  taskEl.className = 'queue-item';
-  taskEl.id = `task-${taskId}`;
-  taskEl.innerHTML = `
-    <div class="queue-info">
-      <div class="queue-name" title="${escapeHtml(displayFilename)}">${escapeHtml(displayFilename)}</div>
-      <div class="queue-size" id="task-size-${taskId}">解析中...</div>
-    </div>
-    <div class="queue-progress-bar-bg">
-      <div class="queue-progress-bar-fill" id="task-progress-${taskId}"></div>
-    </div>
-    <div class="queue-footer">
-      <div class="queue-status" id="task-status-${taskId}">等待获取链接</div>
-      <div class="queue-percentage" id="task-pct-${taskId}">0%</div>
-    </div>
-    <div class="queue-action" id="task-action-${taskId}"></div>
-  `;
-
-  // Insert to the top of queue
-  const firstChild = el.queueList.firstChild;
-  if (firstChild && el.queueList.querySelector('.empty-state')) {
-    el.queueList.innerHTML = '';
-  }
-  el.queueList.insertBefore(taskEl, el.queueList.firstChild);
+  const taskEl = createDownloadTaskElement(taskId, displayFilename);
 
   showToast(`开始下载任务: ${song.name}`, 'info');
   updateDownloadProgressOnCard(song.songmid, song.source, 0);
 
   try {
-    const statusText = document.getElementById(`task-status-${taskId}`);
-    const sizeText = document.getElementById(`task-size-${taskId}`);
-    const progressFill = document.getElementById(`task-progress-${taskId}`);
-    const pctText = document.getElementById(`task-pct-${taskId}`);
-    const actionEl = document.getElementById(`task-action-${taskId}`);
+    const { statusText, sizeText, progressFill, pctText, actionEl } = getDownloadTaskUi(taskId);
 
     const useDownloadPage = isIOSBrowser() && !isWeChatBrowser();
     const useRawDownload = isMobileBrowser();
@@ -2968,6 +3031,7 @@ function showToast(message, type = 'info') {
 
 // Update Song Card Download Progress Ring
 function updateDownloadProgressOnCard(songmid, source, pct, isError = false, isSuccess = false) {
+  if (!songmid || !source) return;
   const wrappers = document.querySelectorAll(`.download-progress-wrapper[data-songmid="${songmid}"][data-source="${source}"]`);
   wrappers.forEach(wrapper => {
     const ring = wrapper.querySelector('.progress-ring');
@@ -3173,6 +3237,13 @@ const inlinePlayer = createPlayerPageController({
   },
   download: () => {
     if (!activePlaybackContext?.song) return;
+    if (activePlaybackContext.downloadUrl && createDownloadTaskFromResolvedUrl(
+      activePlaybackContext.song,
+      activePlaybackContext.downloadUrl,
+      activePlaybackContext.filename
+    )) {
+      return;
+    }
     openDownloadModal(activePlaybackContext.song);
   },
   back: closeInlinePlayerOverlay,
