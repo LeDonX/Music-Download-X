@@ -977,25 +977,27 @@ function showInPageSaveAction({ actionEl, blob, filename, statusText }) {
       button.disabled = false;
     }
   });
+
+  return button;
 }
 
-function showReleaseDownloadAction({ actionEl, taskId, statusText }) {
-  if (!actionEl) return;
-
-  const button = document.createElement('button');
-  button.className = 'queue-save-btn secondary';
-  button.type = 'button';
-  button.textContent = '下载完成，允许下一首';
-  actionEl.innerHTML = '';
-  actionEl.appendChild(button);
-
-  button.addEventListener('click', () => {
-    releaseDownloadTask(taskId);
-    button.disabled = true;
-    statusText.innerText = '已允许下载下一首';
+async function tryAutoSaveBlob({ blob, filename, statusText, saveButton }) {
+  statusText.innerText = '文件已生成，正在打开保存...';
+  try {
+    await saveBlobFromPage(blob, filename);
+    statusText.innerText = '已打开保存/下载，请按浏览器提示完成';
     statusText.className = 'queue-status completed';
-    showToast('可以开始下一首下载了', 'success');
-  });
+    if (saveButton) saveButton.textContent = '再次保存文件';
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      statusText.innerText = '保存已取消，可点击保存文件重试';
+      statusText.className = 'queue-status warning';
+    } else {
+      statusText.innerText = '浏览器未允许自动保存，请点击保存文件';
+      statusText.className = 'queue-status warning';
+      console.warn('[Download] auto save failed:', err);
+    }
+  }
 }
 
 function showBrowserDownloadAction({ actionEl, downloadUrl, filename, statusText, taskId }) {
@@ -1203,10 +1205,11 @@ async function downloadInsidePage(downloadUrl, filename, ui, song) {
   progressFill.style.width = '100%';
   pctText.innerText = '100%';
   sizeText.innerText = formatFileSize(blob.size) || '已完成';
-  statusText.innerText = '文件已在网页内准备好，请点击保存';
+  statusText.innerText = '文件已在网页内准备好';
   statusText.className = 'queue-status completed';
   updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
-  showInPageSaveAction({ actionEl, blob, filename, statusText });
+  const saveButton = showInPageSaveAction({ actionEl, blob, filename, statusText });
+  await tryAutoSaveBlob({ blob, filename, statusText, saveButton });
 }
 
 function buildPicParams(song) {
