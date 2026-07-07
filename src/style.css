@@ -1493,6 +1493,12 @@ body {
   pointer-events: auto;
 }
 
+.modal-overlay.force-hidden {
+  display: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 .inline-player-open .modal-overlay.active {
   z-index: 4000;
 }

@@ -1107,7 +1107,7 @@ function createDownloadTaskFromResolvedUrl(song, downloadUrl, filename, options 
     return true;
   }
 
-  downloadInsidePage(absoluteDownloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song)
+  downloadInsidePage(absoluteDownloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song, { taskId })
     .then(() => {
       showToast(`文件已生成: ${song?.name || finalFilename}`, 'success');
     })
@@ -1150,66 +1150,108 @@ function tryDownloadFromActivePlayback(song, quality) {
   );
 }
 
-async function downloadInsidePage(downloadUrl, filename, ui, song) {
+async function downloadInsidePage(downloadUrl, filename, ui, song, options = {}) {
   const { statusText, sizeText, progressFill, pctText, actionEl } = ui;
+  const { taskId = '' } = options;
   statusText.innerText = '正在网页内生成带封面文件...';
   sizeText.innerText = '正在连接...';
   progressFill.style.width = '5%';
   pctText.innerText = '0%';
 
-  const res = await fetch(downloadUrl, { cache: 'no-store' });
-  if (!res.ok) {
-    const message = (await res.text().catch(() => '')).slice(0, 160);
-    throw new Error(message || `HTTP ${res.status}`);
+  const controller = new AbortController();
+  if (taskId) {
+    inPageDownloadTasks.set(taskId, {
+      taskId,
+      downloadUrl,
+      filename,
+      statusText,
+      sizeText,
+      progressFill,
+      pctText,
+      actionEl,
+      song,
+      controller,
+      warnedHidden: false,
+    });
   }
 
-  const total = getDownloadContentLength(res);
-  const contentType = res.headers.get('content-type') || getMimeTypeFromFilename(filename);
-  let received = 0;
-  let lastPct = 0;
+  let completed = false;
+  try {
+    const res = await fetch(downloadUrl, { cache: 'no-store', signal: controller.signal });
+    if (!res.ok) {
+      const message = (await res.text().catch(() => '')).slice(0, 160);
+      throw new Error(message || `HTTP ${res.status}`);
+    }
 
-  const updateProgress = () => {
-    if (total > 0) {
-      const pct = Math.max(1, Math.min(99, Math.floor((received / total) * 100)));
-      if (pct !== lastPct) {
-        lastPct = pct;
-        progressFill.style.width = `${pct}%`;
-        pctText.innerText = `${pct}%`;
-        updateDownloadProgressOnCard(song.songmid, song.source, pct);
+    const total = getDownloadContentLength(res);
+    const contentType = res.headers.get('content-type') || getMimeTypeFromFilename(filename);
+    let received = 0;
+    let lastPct = 0;
+
+    const updateProgress = () => {
+      if (total > 0) {
+        const pct = Math.max(1, Math.min(99, Math.floor((received / total) * 100)));
+        if (pct !== lastPct) {
+          lastPct = pct;
+          progressFill.style.width = `${pct}%`;
+          pctText.innerText = `${pct}%`;
+          updateDownloadProgressOnCard(song.songmid, song.source, pct);
+        }
+        sizeText.innerText = `${formatFileSize(received)} / ${formatFileSize(total)}`;
+      } else {
+        progressFill.style.width = '35%';
+        pctText.innerText = formatFileSize(received) || '接收中';
+        sizeText.innerText = '正在接收文件...';
       }
-      sizeText.innerText = `${formatFileSize(received)} / ${formatFileSize(total)}`;
+    };
+
+    let blob;
+    if (res.body?.getReader) {
+      const reader = res.body.getReader();
+      const chunks = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        updateProgress();
+      }
+      blob = new Blob(chunks, { type: contentType });
     } else {
-      progressFill.style.width = '35%';
-      pctText.innerText = formatFileSize(received) || '接收中';
-      sizeText.innerText = '正在接收文件...';
+      blob = await res.blob();
+      received = blob.size;
     }
-  };
 
-  let blob;
-  if (res.body?.getReader) {
-    const reader = res.body.getReader();
-    const chunks = [];
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
-      updateProgress();
-    }
-    blob = new Blob(chunks, { type: contentType });
-  } else {
-    blob = await res.blob();
-    received = blob.size;
+    progressFill.style.width = '100%';
+    pctText.innerText = '100%';
+    sizeText.innerText = formatFileSize(blob.size) || '已完成';
+    statusText.innerText = '文件已在网页内准备好';
+    statusText.className = 'queue-status completed';
+    updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
+    const saveButton = showInPageSaveAction({ actionEl, blob, filename, statusText });
+    await tryAutoSaveBlob({ blob, filename, statusText, saveButton });
+    completed = true;
+  } finally {
+    if (taskId) inPageDownloadTasks.delete(taskId);
   }
+}
 
-  progressFill.style.width = '100%';
-  pctText.innerText = '100%';
-  sizeText.innerText = formatFileSize(blob.size) || '已完成';
-  statusText.innerText = '文件已在网页内准备好';
-  statusText.className = 'queue-status completed';
-  updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
-  const saveButton = showInPageSaveAction({ actionEl, blob, filename, statusText });
-  await tryAutoSaveBlob({ blob, filename, statusText, saveButton });
+function warnInPageDownloadsBackgrounded() {
+  if (!inPageDownloadTasks.size) return;
+  inPageDownloadTasks.forEach((task) => {
+    if (task.warnedHidden) return;
+    task.warnedHidden = true;
+    task.statusText.innerText = '页面已转入后台，网页内下载可能会被浏览器暂停';
+    task.statusText.className = 'queue-status warning';
+    task.sizeText.innerText = '需要后台继续时请改用浏览器下载';
+    showBrowserDownloadAction({
+      actionEl: task.actionEl,
+      downloadUrl: task.downloadUrl,
+      filename: task.filename,
+      statusText: task.statusText,
+      taskId: task.taskId,
+    });
+  });
 }
 
 function buildPicParams(song) {
@@ -2045,6 +2087,20 @@ const el = {
 };
 
 let songToDownload = null;
+const inPageDownloadTasks = new Map();
+
+function closeQualityModal() {
+  el.qualityModal.classList.remove('active');
+  el.qualityModal.classList.add('force-hidden');
+  songToDownload = null;
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
+  requestAnimationFrame(() => {
+    el.qualityModal.classList.remove('active');
+    el.qualityModal.classList.add('force-hidden');
+  });
+}
 
 // Initialize Application
 async function init() {
@@ -2074,6 +2130,10 @@ async function init() {
 function setupEventListeners() {
   document.addEventListener('pointerup', blurInteractiveTarget, true);
   document.addEventListener('click', blurInteractiveTarget, true);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) warnInPageDownloadsBackgrounded();
+  });
+  window.addEventListener('pagehide', warnInPageDownloadsBackgrounded);
 
   // Search actions
   el.searchBtn.addEventListener('click', performSearch);
@@ -2199,26 +2259,23 @@ function setupEventListeners() {
 
   // Quality modal close
   el.modalCloseBtn.addEventListener('click', () => {
-    el.qualityModal.classList.remove('active');
-    songToDownload = null;
+    closeQualityModal();
+  });
+  el.qualityModal.addEventListener('click', (event) => {
+    if (event.target === el.qualityModal) closeQualityModal();
   });
 
-  // Select quality download
-  let lastQualityPointerSelectAt = 0;
   const handleQualitySelect = (event) => {
-    if (event.type === 'click' && Date.now() - lastQualityPointerSelectAt < 700) return;
     const btn = event.target?.closest?.('.quality-btn');
     if (!btn || !el.qualityModal.classList.contains('active')) return;
     if (btn.disabled || btn.style.display === 'none') return;
 
     event.preventDefault();
     event.stopPropagation();
-    if (event.type === 'pointerdown') lastQualityPointerSelectAt = Date.now();
 
     const quality = btn.getAttribute('data-quality');
     const downloadSong = songToDownload;
-    songToDownload = null;
-    el.qualityModal.classList.remove('active');
+    closeQualityModal();
 
     if (downloadSong) {
       void startDownloadTask(downloadSong, quality);
@@ -2226,7 +2283,6 @@ function setupEventListeners() {
       showToast('下载歌曲信息已失效，请重新点击下载', 'warning');
     }
   };
-  el.qualityModal.addEventListener('pointerdown', handleQualitySelect, true);
   el.qualityModal.addEventListener('click', handleQualitySelect, true);
 }
 
@@ -2907,6 +2963,7 @@ function openDownloadModal(song) {
     }
   });
   
+  el.qualityModal.classList.remove('force-hidden');
   el.qualityModal.classList.add('active');
 }
 
@@ -2984,7 +3041,7 @@ async function startDownloadTask(song, quality) {
     }
 
     try {
-      await downloadInsidePage(downloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song);
+      await downloadInsidePage(downloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song, { taskId });
       releaseDownloadTask(taskId);
       if (isQualityChanged) {
         showToast(`文件已生成: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
