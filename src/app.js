@@ -1088,7 +1088,9 @@ function createDownloadTaskFromResolvedUrl(song, downloadUrl, filename, options 
   createDownloadTaskElement(taskId, finalFilename);
   const { statusText, sizeText, progressFill, pctText, actionEl } = getDownloadTaskUi(taskId);
   const useDownloadPage = isIOSBrowser() && !isWeChatBrowser();
-  const absoluteDownloadUrl = toAbsoluteUrl(downloadUrl);
+  const resolvedUrl = new URL(downloadUrl, window.location.href);
+  if (isMobileBrowser()) resolvedUrl.searchParams.set('raw', '1');
+  const absoluteDownloadUrl = resolvedUrl.toString();
 
   showToast(`开始下载任务: ${song?.name || finalFilename}`, 'info');
   updateDownloadProgressOnCard(song?.songmid, song?.source, 10);
@@ -1125,6 +1127,30 @@ function createDownloadTaskFromResolvedUrl(song, downloadUrl, filename, options 
   updateDownloadProgressOnCard(song?.songmid, song?.source, 100, false, true);
   showToast(`已创建下载任务: ${song?.name || finalFilename}`, 'success');
   return true;
+}
+
+function tryDownloadFromActivePlayback(song, quality) {
+  const selectedQuality = normalizeQualityType(quality) || quality;
+  if (selectedQuality !== '128k') return false;
+  if (!song || !activePlaybackContext?.downloadUrl || !activePlaybackContext?.song) return false;
+  const playbackQuality = normalizeQualityType(activePlaybackContext.quality || '128k') || '128k';
+  if (playbackQuality !== selectedQuality) return false;
+  const activeSong = activePlaybackContext.song;
+  const sameSong =
+    getSongKey(activeSong) === getSongKey(song) ||
+    (
+      activeSong.name === song.name &&
+      activeSong.singer === song.singer &&
+      (!activeSong.interval || !song.interval || activeSong.interval === song.interval)
+    );
+
+  if (!sameSong) return false;
+
+  return createDownloadTaskFromResolvedUrl(
+    activeSong,
+    activePlaybackContext.downloadUrl,
+    activePlaybackContext.filename
+  );
 }
 
 async function downloadInsidePage(downloadUrl, filename, ui, song) {
@@ -2895,6 +2921,9 @@ async function startDownloadTask(song, quality) {
   const selectedQuality = normalizeQualityType(quality) || quality;
   const defaultExt = getDefaultExtensionForQuality(selectedQuality);
   const displayFilename = buildSongFilename(song, defaultExt);
+
+  if (tryDownloadFromActivePlayback(song, selectedQuality)) return;
+
   const taskId = Date.now().toString();
   lockDownloadTask(taskId, song);
 
@@ -3178,6 +3207,7 @@ function createPlaybackStateSnapshot() {
     audioUrl: audio.currentSrc || activePlaybackContext.audioUrl,
     downloadUrl: activePlaybackContext.downloadUrl || '',
     filename: activePlaybackContext.filename || '',
+    quality: activePlaybackContext.quality || '128k',
     lyrics: Array.isArray(activeLyrics) ? activeLyrics.slice(0, 220) : [],
     currentTime: getFiniteSeconds(audio.currentTime),
     duration: getFiniteSeconds(audio.duration),
@@ -3237,13 +3267,6 @@ const inlinePlayer = createPlayerPageController({
   },
   download: () => {
     if (!activePlaybackContext?.song) return;
-    if (activePlaybackContext.downloadUrl && createDownloadTaskFromResolvedUrl(
-      activePlaybackContext.song,
-      activePlaybackContext.downloadUrl,
-      activePlaybackContext.filename
-    )) {
-      return;
-    }
     openDownloadModal(activePlaybackContext.song);
   },
   back: closeInlinePlayerOverlay,
@@ -3316,6 +3339,7 @@ function restorePlaybackStateSnapshot() {
     audioUrl: snapshot.audioUrl,
     downloadUrl: snapshot.downloadUrl || '',
     filename: snapshot.filename || '',
+    quality: snapshot.quality || '128k',
   };
 
   itemEl.classList.add('expanded');
@@ -3733,6 +3757,7 @@ async function togglePlay(song, itemEl) {
       audioUrl: getPlaybackDownloadUrl(downloadUrl),
       downloadUrl,
       filename: finalFilename || displayFilename,
+      quality: '128k',
     };
 
     currentTimeText.innerText = '00:00';
