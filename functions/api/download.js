@@ -9,6 +9,7 @@ function getReferer(targetUrl) {
 }
 
 const COVER_FETCH_TIMEOUT_MS = 8000;
+const MEDIA_FETCH_TIMEOUT_MS = 12000;
 const COVER_MAX_BYTES = 3 * 1024 * 1024;
 const FLAC_VENDOR = 'Music Download X';
 
@@ -561,10 +562,18 @@ async function handleDownload(url, filename, headers, meta = {}, requestUrl = ''
     const isPlayback = meta.play === '1';
     const requestRange = requestHeaders.get('range') || '';
     const coverPromise = isPlayback ? Promise.resolve(null) : fetchCoverBytes(meta.cover || '', requestUrl);
-    const res = await fetch(targetUrl.toString(), {
-      headers: getDownloadHeaders(targetUrl.toString(), headers, isPlayback ? (requestRange || 'bytes=0-') : 'bytes=0-'),
-      redirect: 'follow',
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(new Error('media fetch timeout')), MEDIA_FETCH_TIMEOUT_MS);
+    let res;
+    try {
+      res = await fetch(targetUrl.toString(), {
+        headers: getDownloadHeaders(targetUrl.toString(), headers, isPlayback ? (requestRange || 'bytes=0-') : 'bytes=0-'),
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!res.ok) {
       return new Response(`Failed to fetch media file: ${res.status} ${res.statusText}`, {

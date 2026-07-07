@@ -21,6 +21,11 @@ function startDownload(url, filename) {
   document.body.removeChild(a);
 }
 
+function isIOSBrowser() {
+  const ua = navigator.userAgent || '';
+  return /iP(hone|ad|od)/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
 function init() {
   const { url, filename } = getParams();
   const startBtn = document.getElementById('startDownloadBtn');
@@ -36,6 +41,11 @@ function init() {
   startBtn?.addEventListener('click', () => {
     if (!url || !/^https?:\/\//i.test(url)) return;
     startDownload(url, filename);
+    if (isIOSBrowser()) {
+      setTimeout(() => {
+        window.location.href = url;
+      }, 80);
+    }
     startBtn.textContent = '已交给浏览器';
     setText('downloadHint', '下载已交给浏览器处理。如果没有看到进度，请打开浏览器下载列表，或回到桌面查看系统下载状态。');
   });

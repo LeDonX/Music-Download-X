@@ -23,6 +23,10 @@ const SEARCH_TIMEOUT_MS = 18000;
 const SEARCH_EMPTY_RETRY_LIMIT = 3;
 const SEARCH_RETRY_DELAYS = [250, 700, 1400];
 const RESOLVE_TIMEOUT_MS = 22000;
+const DOWNLOAD_RESOLVE_TIMEOUT_MS = 9000;
+const DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS = 6000;
+const DOWNLOAD_MAX_RESOLVERS = 3;
+const DOWNLOAD_FALLBACK_BATCH_LIMIT = 2;
 const RESOLUTION_HEADER_TIMEOUT_MS = 7000;
 const RESOLUTION_METADATA_TIMEOUT_MS = 12000;
 const LYRIC_NATIVE_TIMEOUT_MS = 4200;
@@ -834,6 +838,25 @@ async function validateResolvedDownload(downloadUrl, song, statusText, resolutio
   if (issue) throw new Error(issue);
 }
 
+async function validateResolvedDownloadHeaders(downloadUrl, song, statusText, resolution) {
+  const sourceName = getResolverName(resolution.successfulUrl);
+  const expectedSeconds = intervalToSeconds(song.interval);
+  const playbackUrl = getPlaybackDownloadUrl(downloadUrl);
+
+  statusText.innerText = `[${sourceName}] 正在快速校验下载链接...`;
+
+  const headers = await probeResolvedMediaHeaders(playbackUrl);
+  if (!headers.ok) {
+    throw new Error(`音频预检失败: HTTP ${headers.status}`);
+  }
+  if (/text\/html|application\/json/i.test(headers.contentType)) {
+    throw new Error('解析结果不是音频文件');
+  }
+
+  const issue = getSuspiciousResolvedMediaReason(headers, expectedSeconds);
+  if (issue) throw new Error(issue);
+}
+
 async function validatePlaybackResolvedDownload(downloadUrl, song) {
   const expectedSeconds = intervalToSeconds(song.interval);
   if (expectedSeconds > 0 && expectedSeconds < PLAYBACK_SHORT_MIN_EXPECTED_SECONDS) return;
@@ -982,6 +1005,24 @@ function showBrowserDownloadAction({ actionEl, downloadUrl, filename, statusText
     statusText.className = 'queue-status completed';
     releaseDownloadTask(taskId);
     actionEl.innerHTML = '';
+  });
+}
+
+function showDownloadPageAction({ actionEl, downloadUrl, filename, statusText, taskId }) {
+  if (!actionEl) return;
+
+  const button = document.createElement('button');
+  button.className = 'queue-save-btn';
+  button.type = 'button';
+  button.textContent = '打开下载页';
+  actionEl.innerHTML = '';
+  actionEl.appendChild(button);
+
+  button.addEventListener('click', () => {
+    window.location.href = buildDownloadPageUrl(downloadUrl, filename);
+    statusText.innerText = '已打开下载页';
+    statusText.className = 'queue-status completed';
+    releaseDownloadTask(taskId);
   });
 }
 
@@ -1199,7 +1240,8 @@ function rankAlternativeSearchResults(song, quality, data, seen) {
     .map(({ _fallbackScore, ...candidate }) => candidate);
 }
 
-function createAlternativeSongCollector(song, quality) {
+function createAlternativeSongCollector(song, quality, options = {}) {
+  const { searchTimeoutMs = 15000 } = options;
   const keyword = `${song.name || ''} ${song.singer || ''}`.trim();
   const seen = new Set();
   let pending = [];
@@ -1209,7 +1251,7 @@ function createAlternativeSongCollector(song, quality) {
       .filter(source => source !== song.source)
       .map(source => ({
         source,
-        promise: fetchSourceSearch(keyword, source),
+        promise: fetchSourceSearch(keyword, source, 25, searchTimeoutMs),
       }));
   }
 
@@ -1352,6 +1394,10 @@ function getResolverUrlsToTry() {
   return [state.scriptUrl, ...SOURCE_URLS.filter(u => u !== state.scriptUrl)];
 }
 
+function getDownloadResolverUrlsToTry(limit = DOWNLOAD_MAX_RESOLVERS) {
+  return getResolverUrlsToTry().slice(0, Math.max(1, limit));
+}
+
 async function loadResolverForDownload(url, timeoutMs = RESOLVE_TIMEOUT_MS) {
   const sourceName = getResolverName(url);
   return withTimeout(
@@ -1420,7 +1466,7 @@ function buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt
 }
 
 async function buildDownloadUrlFromResolution(resolution, quality, filename, song, statusText, options = {}) {
-  const { validate = true, includeCover = true } = options;
+  const { validate = true, includeCover = true, useExistingCover = true } = options;
   const sourceName = getResolverName(resolution.successfulUrl);
 
   const mediaInfo = getDownloadMediaInfo('', quality, resolution.resolvedQuality, resolution.audioUrl);
@@ -1428,12 +1474,14 @@ async function buildDownloadUrlFromResolution(resolution, quality, filename, son
   const finalFilename = buildSongFilename(song, finalExt);
   const metadataSong = resolution.resolvedSong || song;
   const preliminaryDownloadUrl = buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt);
-  if (validate) {
+  if (validate === 'headers') {
+    await validateResolvedDownloadHeaders(preliminaryDownloadUrl, metadataSong, statusText, resolution);
+  } else if (validate) {
     await validateResolvedDownload(preliminaryDownloadUrl, metadataSong, statusText, resolution);
   }
 
   statusText.innerText = `[${sourceName}] 正在准备带封面和歌手信息的下载...`;
-  const coverUrl = includeCover ? await getBestCoverUrl(metadataSong) : (metadataSong.img || '');
+  const coverUrl = includeCover ? await getBestCoverUrl(metadataSong) : (useExistingCover ? (metadataSong.img || '') : '');
   const downloadUrl = buildDownloadProxyUrl(resolution, finalFilename, metadataSong, finalExt, coverUrl);
 
   return {
@@ -1456,18 +1504,23 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
     eagerAlternatives = false,
     loadTimeoutMs = RESOLVE_TIMEOUT_MS,
     resolveTimeoutMs = RESOLVE_TIMEOUT_MS,
+    fallbackBatchLimit = Infinity,
+    fallbackSearchTimeoutMs = 15000,
+    resolverUrls = getResolverUrlsToTry(),
   } = options;
-  let alternativeCollector = eagerAlternatives ? createAlternativeSongCollector(song, quality) : null;
+  let alternativeCollector = eagerAlternatives
+    ? createAlternativeSongCollector(song, quality, { searchTimeoutMs: fallbackSearchTimeoutMs })
+    : null;
 
   const getAlternativeBatch = async (sourceName) => {
     if (!alternativeCollector) {
       statusText.innerText = `[${sourceName}] 原平台不可用，正在匹配其它平台...`;
-      alternativeCollector = createAlternativeSongCollector(song, quality);
+      alternativeCollector = createAlternativeSongCollector(song, quality, { searchTimeoutMs: fallbackSearchTimeoutMs });
     }
     return alternativeCollector.nextBatch();
   };
 
-  for (const url of getResolverUrlsToTry()) {
+  for (const url of resolverUrls) {
     const sourceName = getResolverName(url);
     let sandboxInstance = null;
     try {
@@ -1492,7 +1545,7 @@ async function createDownloadLinkWithFallback(song, quality, filename, statusTex
       const alternatives = await getAlternativeBatch(sourceName);
       if (!alternatives.length) break;
       triedAlternative = true;
-      for (const candidate of alternatives) {
+      for (const candidate of alternatives.slice(0, fallbackBatchLimit)) {
         try {
           statusText.innerText = `[${sourceName}] 正在尝试 ${getPlatformName(candidate.source)}...`;
           return await resolveWithLoadedResolver(url, sandboxInstance, candidate, quality, statusText, (resolution) => {
@@ -1933,13 +1986,16 @@ function setupEventListeners() {
   });
 
   // Select quality download
+  let lastQualityPointerSelectAt = 0;
   const handleQualitySelect = (event) => {
+    if (event.type === 'click' && Date.now() - lastQualityPointerSelectAt < 700) return;
     const btn = event.target?.closest?.('.quality-btn');
     if (!btn || !el.qualityModal.classList.contains('active')) return;
     if (btn.disabled || btn.style.display === 'none') return;
 
     event.preventDefault();
     event.stopPropagation();
+    if (event.type === 'pointerdown') lastQualityPointerSelectAt = Date.now();
 
     const quality = btn.getAttribute('data-quality');
     const downloadSong = songToDownload;
@@ -2685,11 +2741,20 @@ async function startDownloadTask(song, quality) {
     const pctText = document.getElementById(`task-pct-${taskId}`);
     const actionEl = document.getElementById(`task-action-${taskId}`);
 
-    const useInPageDownload = isIOSBrowser() && !isWeChatBrowser();
-    statusText.innerText = useInPageDownload ? '正在解析页内下载链接...' : '正在解析链接...';
+    const useDownloadPage = isIOSBrowser() && !isWeChatBrowser();
+    statusText.innerText = useDownloadPage ? '正在准备 iPhone 下载页...' : '正在解析链接...';
     updateDownloadProgressOnCard(song.songmid, song.source, 5);
 
-    const { downloadUrl, resolution, mediaInfo, finalFilename } = await createDownloadLinkWithFallback(song, quality, displayFilename, statusText);
+    const { downloadUrl, resolution, mediaInfo, finalFilename } = await createDownloadLinkWithFallback(song, quality, displayFilename, statusText, {
+      validate: 'headers',
+      includeCover: false,
+      useExistingCover: false,
+      loadTimeoutMs: DOWNLOAD_RESOLVE_TIMEOUT_MS,
+      resolveTimeoutMs: DOWNLOAD_RESOLVE_TIMEOUT_MS,
+      fallbackBatchLimit: DOWNLOAD_FALLBACK_BATCH_LIMIT,
+      fallbackSearchTimeoutMs: DOWNLOAD_FALLBACK_SEARCH_TIMEOUT_MS,
+      resolverUrls: getDownloadResolverUrlsToTry(),
+    });
     const resolvedSong = resolution.resolvedSong;
     const usedFallback = resolvedSong.source !== song.source || resolvedSong.songmid !== song.songmid;
     const actualQuality = mediaInfo.actualQuality;
@@ -2719,29 +2784,16 @@ async function startDownloadTask(song, quality) {
       return;
     }
 
-    if (useInPageDownload) {
-      try {
-        await downloadInsidePage(downloadUrl, finalFilename, { statusText, sizeText, progressFill, pctText, actionEl }, song);
-        releaseDownloadTask(taskId);
-        if (isQualityChanged) {
-          showToast(`文件已生成: ${song.name} (实际下载为 ${formatQualityLabel(actualQuality)})`, 'warning');
-        } else if (usedFallback) {
-          showToast(`文件已生成: ${song.name} (已自动切换到${getPlatformName(resolvedSong.source)})`, 'success');
-        } else {
-          showToast('文件已生成，点击保存文件即可存到手机', 'success');
-        }
-      } catch (err) {
-        console.warn('[Download] in-page download interrupted:', err);
-        const reason = getReadableError(err);
-        statusText.innerText = `网页内下载中断: ${reason}`;
-        statusText.className = 'queue-status warning';
-        sizeText.innerText = '可改用浏览器下载同一文件';
-        progressFill.style.width = '100%';
-        pctText.innerText = '待处理';
-        updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
-        showBrowserDownloadAction({ actionEl, downloadUrl, filename: finalFilename, statusText, taskId });
-        showToast('网页内下载中断，请点击“用浏览器下载”继续', 'warning');
-      }
+    if (useDownloadPage) {
+      statusText.innerText = '下载页已准备好' + qualityWarnText;
+      statusText.className = 'queue-status completed';
+      sizeText.innerText = '正在打开下载页';
+      progressFill.style.width = '100%';
+      pctText.innerText = '已准备';
+      updateDownloadProgressOnCard(song.songmid, song.source, 100, false, true);
+      showDownloadPageAction({ actionEl, downloadUrl, filename: finalFilename, statusText, taskId });
+      showToast('iPhone 请点击“打开下载页”开始下载', 'success');
+      window.location.href = buildDownloadPageUrl(downloadUrl, finalFilename);
       return;
     }
 
